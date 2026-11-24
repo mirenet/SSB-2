@@ -32,7 +32,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.security.PrivateKey;
@@ -50,7 +49,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int FILE_CHOOSER_RESULT_CODE = 1;
     private static final String SKELETON_ASSET_NAME = "skeleton.apk";
 
-    // Podesi svoj lokalni keystore u getFilesDir() ili assets/ (za test/lokalni potpis)
+    // Podesi svoj lokalni keystore u assets/ (za lokalni potpis)
     private static final String KEYSTORE_ASSET_NAME = "signing_keystore.bks";
     private static final String KEYSTORE_PASSWORD = "changeit";
     private static final String KEY_ALIAS = "ssb_key";
@@ -197,18 +196,18 @@ public class MainActivity extends AppCompatActivity {
                 AndroidManifest manifest = module.getAndroidManifest();
                 manifest.setPackageName(packageName);
 
-                if (appName != null && !appName.isEmpty()) {
-                    // Ako skeleton.apk koristi direktan label u manifestu ili resurs app_name,
-                    // prilagodi prema strukturi tvog skeleton.apk-a
-                    manifest.setApplicationLabel(appName);
-                }
                 if (sdkMin != null && !sdkMin.isEmpty()) {
-                    manifest.setMinSdkVersion(Integer.parseInt(sdkMin));
+                    try {
+                        manifest.setMinSdkVersion(Integer.parseInt(sdkMin));
+                    } catch (Exception ignored) {
+                    }
                 }
                 if (sdkMax != null && !sdkMax.isEmpty()) {
-                    manifest.setTargetSdkVersion(Integer.parseInt(sdkMax));
+                    try {
+                        manifest.setTargetSdkVersion(Integer.parseInt(sdkMax));
+                    } catch (Exception ignored) {
+                    }
                 }
-                manifest.refresh();
             }
 
             if (buildCancelled) {
@@ -315,7 +314,6 @@ public class MainActivity extends AppCompatActivity {
                     continue;
                 }
 
-                // Ako menjaš ikonicu u standardnim res/mipmap-* PNG fajlovima
                 if (iconBytes != null && name.startsWith("res/mipmap-") && name.toLowerCase(Locale.US).endsWith(".png")) {
                     zos.putNextEntry(new ZipEntry(name));
                     zos.write(iconBytes);
