@@ -64,8 +64,8 @@ public class MainActivity extends AppCompatActivity {
     private static final String SKELETON_ASSET_NAME = "skeleton.apk";
     private static final String KEY_FILE_NAME = "ssb_signer_key.pk8";
     private static final String CERT_FILE_NAME = "ssb_signer_cert.der";
+    private static final char INVISIBLE_PAD_CHAR = '\u200B';
 
-    // Dozvoljava samo slova (uključujući naša slova ako treba, ovde A-Za-z) bez brojeva, razmaka i znakova
     private static final Pattern LABEL_LETTERS_ONLY_PATTERN = Pattern.compile("^[A-Za-z]+$");
 
     private static final String FALLBACK_CONFIG =
@@ -172,10 +172,14 @@ public class MainActivity extends AppCompatActivity {
     private void sendSkeletonPackageLengthToUi(File customApkFile) {
         try {
             String detectedPkg = extractPackageNameFromApk(customApkFile);
+            byte[] manifestBytes = readManifestBytesFromApk(customApkFile);
+            String detectedLabel = detectCurrentLabel(manifestBytes);
+            int labelLen = (detectedLabel != null && !detectedLabel.isEmpty()) ? detectedLabel.length() : 0;
+
             if (detectedPkg != null && !detectedPkg.isEmpty()) {
                 String encodedPkg = Base64.encodeToString(detectedPkg.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
                 mainHandler.post(() -> webView.evaluateJavascript(
-                        "setApkMetadata('', decodeURIComponent(escape(atob('" + encodedPkg + "'))));",
+                        "setApkMetadata(" + labelLen + ", decodeURIComponent(escape(atob('" + encodedPkg + "'))));",
                         null
                 ));
             }
@@ -254,6 +258,17 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private String padRightWithInvisible(String text, int targetLength) {
+        if (text == null || targetLength <= 0 || text.length() >= targetLength) {
+            return text;
+        }
+        StringBuilder sb = new StringBuilder(text);
+        while (sb.length() < targetLength) {
+            sb.append(INVISIBLE_PAD_CHAR);
+        }
+        return sb.toString();
+    }
+
     private void buildLocalApkWithArsclibAndSign(
             String appName,
             String packageName,
@@ -270,7 +285,6 @@ public class MainActivity extends AppCompatActivity {
                 throw new IllegalArgumentException("Invalid package name (e.g. com.example.myapp).");
             }
 
-            // Ograničenje labela na čista slova (bez razmaka, brojeva i specijalnih znakova)
             String cleanLabel = appName != null ? appName.trim() : "";
             if (!cleanLabel.isEmpty() && !LABEL_LETTERS_ONLY_PATTERN.matcher(cleanLabel).matches()) {
                 throw new IllegalArgumentException("App name must contain letters only (A-Z, a-z).");
@@ -291,11 +305,24 @@ public class MainActivity extends AppCompatActivity {
             byte[] originalManifest = readManifestBytesFromApk(sourceApk);
             String currentLabel = detectCurrentLabel(originalManifest);
 
-            if (!cleanLabel.isEmpty() && currentLabel != null && cleanLabel.length() != currentLabel.length()) {
-                logToUi("[WARN] Label '" + currentLabel + "' has " + currentLabel.length()
-                        + " letters, but '" + cleanLabel + "' has " + cleanLabel.length()
-                        + " letters — skipping label change so binary manifest stays valid.");
-                cleanLabel = "";
+            String effectivePkg = packageName;
+            if (oldPackage != null && !oldPackage.isEmpty()) {
+                if (effectivePkg.length() > oldPackage.length()) {
+                    effectivePkg = effectivePkg.substring(0, oldPackage.length());
+                } else if (effectivePkg.length() < oldPackage.length()) {
+                    effectivePkg = padRightWithInvisible(effectivePkg, oldPackage.length());
+                    logToUi("[INFO] Padded package name with invisible chars to length " + oldPackage.length() + ".");
+                }
+            }
+
+            String effectiveLabel = cleanLabel;
+            if (!cleanLabel.isEmpty() && currentLabel != null && !currentLabel.isEmpty()) {
+                if (effectiveLabel.length() > currentLabel.length()) {
+                    effectiveLabel = effectiveLabel.substring(0, currentLabel.length());
+                } else if (effectiveLabel.length() < currentLabel.length()) {
+                    effectiveLabel = padRightWithInvisible(cleanLabel, currentLabel.length());
+                    logToUi("[INFO] Padded label with invisible chars to length " + currentLabel.length() + ".");
+                }
             }
 
             if (buildCancelled) return;
@@ -304,7 +331,7 @@ public class MainActivity extends AppCompatActivity {
             byte[] configBytes = buildFinalConfigBytes(configContent, startUrl);
 
             logToUi("[INFO] Updating AndroidManifest, assets/appConfig.js and icons (resources.arsc untouched)..");
-            updateZipEntries(sourceApk, rawPackagedApk, configBytes, iconBytes, oldPackage, packageName, currentLabel, cleanLabel);
+            updateZipEntries(sourceApk, rawPackagedApk, configBytes, iconBytes, oldPackage, effectivePkg, currentLabel, effectiveLabel);
 
             if (buildCancelled) return;
 
@@ -350,11 +377,6 @@ public class MainActivity extends AppCompatActivity {
         return sb.toString();
     }
 
-    /**
-     * Menja samo package reference i (ako je iste dužine i od slova) label u manifestu.
-     * Nikad ne dira nazive klasa/servisa (npr. .MainActivity, .MediaService, InitializationProvider, itd.)
-     * i nikad ne dira resources.arsc.
-     */
     private byte[] patchBinaryManifestFixedLength(
             byte[] manifestBytes,
             String oldPkg,
@@ -366,11 +388,7 @@ public class MainActivity extends AppCompatActivity {
         byte[] out = manifestBytes.clone();
 
         if (oldPkg != null && newPkg != null && !oldPkg.isEmpty() && !newPkg.isEmpty() && !oldPkg.equals(newPkg)) {
-            if (oldPkg.length() != newPkg.length()) {
-                logToUi("[WARN] Package length differs (" + oldPkg.length() + " vs " + newPkg.length()
-                        + "). Keeping original package '" + oldPkg + "' to avoid breaking manifest.");
-            } else {
-                // Menjamo samo tačno oldPkg i poznate prefikse koji ne diraju klase/servise
+            if (oldPkg.length() == newPkg.length()) {
                 replaceStringBothEncodings(out, oldPkg, newPkg);
 
                 String[] safeSuffixes = new String[]{
@@ -381,18 +399,16 @@ public class MainActivity extends AppCompatActivity {
                     replaceStringBothEncodings(out, oldPkg + suffix, newPkg + suffix);
                 }
 
-                // Eksplicitna zaštita da klase/servisi ostanu netaknuti u slučaju da je nešto zakačeno
                 replaceStringBothEncodings(out, newPkg + ".MainActivity", oldPkg + ".MainActivity");
                 replaceStringBothEncodings(out, newPkg + ".MediaService", oldPkg + ".MediaService");
             }
         }
 
-        if (oldLabel != null && newLabel != null
-                && !oldLabel.isEmpty() && !newLabel.isEmpty()
-                && LABEL_LETTERS_ONLY_PATTERN.matcher(newLabel).matches()
-                && oldLabel.length() == newLabel.length()) {
-            int replacedCount = replaceStringBothEncodings(out, oldLabel, newLabel);
-            logToUi("[INFO] Manifest label '" + oldLabel + "' -> '" + newLabel + "' replaced (" + replacedCount + " matches).");
+        if (oldLabel != null && newLabel != null && !oldLabel.isEmpty() && !newLabel.isEmpty()) {
+            if (oldLabel.length() == newLabel.length()) {
+                int replacedCount = replaceStringBothEncodings(out, oldLabel, newLabel);
+                logToUi("[INFO] Manifest label '" + oldLabel + "' -> '" + newLabel + "' replaced (" + replacedCount + " matches).");
+            }
         }
 
         return out;
@@ -523,8 +539,6 @@ public class MainActivity extends AppCompatActivity {
                 if ("AndroidManifest.xml".equals(name)) {
                     entryBytes = patchBinaryManifestFixedLength(entryBytes, oldPkg, newPkg, oldLabel, newLabel);
                 }
-
-                // resources.arsc se namerno ne dira
 
                 if ("assets/appConfig.js".equals(name)) {
                     writeEntryWithMethod(zos, name, configBytes, ZipEntry.DEFLATED);
