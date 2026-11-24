@@ -212,7 +212,7 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 if (oldPackage != null && !oldPackage.isEmpty() && !oldPackage.equals(packageName)) {
-                    replaceConflictingPackageRefs(manifest, oldPackage, packageName);
+                    replacePackageRefsInManifest(manifest, oldPackage, packageName);
                 }
 
                 if (sdkMin != null && !sdkMin.isEmpty()) {
@@ -291,9 +291,63 @@ public class MainActivity extends AppCompatActivity {
             }
         } catch (Throwable ignored) {
         }
+
+        try {
+            Method getTable = module.getClass().getMethod("getTableBlock");
+            Object tableBlock = getTable.invoke(module);
+            if (tableBlock != null) {
+                replaceStringsInObjectTree(tableBlock, oldPkg, newPkg, 0);
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
-    private void replaceConflictingPackageRefs(AndroidManifest manifest, String oldPkg, String newPkg) {
+    private void replaceStringsInObjectTree(Object obj, String oldPkg, String newPkg, int depth) {
+        if (obj == null || depth > 4) return;
+        try {
+            for (Method m : obj.getClass().getMethods()) {
+                if (m.getParameterCount() == 0 && !m.getName().startsWith("getClass")) {
+                    String name = m.getName();
+                    if (name.contains("StringPool") || name.contains("Package") || name.contains("Table")) {
+                        try {
+                            Object child = m.invoke(obj);
+                            if (child != null && child != obj) {
+                                tryReplaceStringEntry(child, oldPkg, newPkg);
+                                replaceStringsInObjectTree(child, oldPkg, newPkg, depth + 1);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void tryReplaceStringEntry(Object pool, String oldPkg, String newPkg) {
+        try {
+            Method getStrings = pool.getClass().getMethod("getStrings");
+            Object listObj = getStrings.invoke(pool);
+            if (listObj instanceof Iterable) {
+                for (Object item : (Iterable<?>) listObj) {
+                    if (item == null) continue;
+                    try {
+                        Method getText = item.getClass().getMethod("getText");
+                        Object txt = getText.invoke(item);
+                        if (txt instanceof String && ((String) txt).contains(oldPkg)) {
+                            String updated = ((String) txt).replace(oldPkg, newPkg);
+                            Method setText = item.getClass().getMethod("setText", String.class);
+                            setText.invoke(item, updated);
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void replacePackageRefsInManifest(AndroidManifest manifest, String oldPkg, String newPkg) {
         try {
             Method getElem = manifest.getClass().getMethod("getResXmlElement");
             Object rootElem = getElem.invoke(manifest);
@@ -307,30 +361,16 @@ public class MainActivity extends AppCompatActivity {
     private void replaceInElementRecursive(Object elem, String oldPkg, String newPkg) {
         if (elem == null) return;
 
-        String tagName = "";
-        try {
-            Method getName = elem.getClass().getMethod("getName");
-            Object n = getName.invoke(elem);
-            if (n != null) tagName = n.toString();
-        } catch (Throwable ignored) {
-        }
-
-        boolean shouldCheckAttrs = "permission".equals(tagName)
-                || "uses-permission".equals(tagName)
-                || "provider".equals(tagName);
-
-        if (shouldCheckAttrs) {
-            for (String attrListMethod : new String[]{"getAttributes", "listAttributes"}) {
-                try {
-                    Method m = elem.getClass().getMethod(attrListMethod);
-                    Object attrsObj = m.invoke(elem);
-                    if (attrsObj instanceof Iterable) {
-                        for (Object attr : (Iterable<?>) attrsObj) {
-                            replaceInAttribute(attr, oldPkg, newPkg);
-                        }
+        for (String attrListMethod : new String[]{"getAttributes", "listAttributes"}) {
+            try {
+                Method m = elem.getClass().getMethod(attrListMethod);
+                Object attrsObj = m.invoke(elem);
+                if (attrsObj instanceof Iterable) {
+                    for (Object attr : (Iterable<?>) attrsObj) {
+                        replaceInAttribute(attr, oldPkg, newPkg);
                     }
-                } catch (Throwable ignored) {
                 }
+            } catch (Throwable ignored) {
             }
         }
 
@@ -349,23 +389,11 @@ public class MainActivity extends AppCompatActivity {
     private void replaceInAttribute(Object attr, String oldPkg, String newPkg) {
         if (attr == null) return;
         try {
-            String attrName = "";
-            try {
-                Method getName = attr.getClass().getMethod("getName");
-                Object n = getName.invoke(attr);
-                if (n != null) attrName = n.toString();
-            } catch (Throwable ignored) {
-            }
-
-            if (!"name".equals(attrName) && !"authorities".equals(attrName)) {
-                return;
-            }
-
             Method getVal = attr.getClass().getMethod("getValueAsString");
             Object valObj = getVal.invoke(attr);
             if (valObj instanceof String) {
                 String val = (String) valObj;
-                if (val.startsWith(oldPkg + ".") || val.equals(oldPkg)) {
+                if (val.contains(oldPkg)) {
                     String updated = val.replace(oldPkg, newPkg);
                     Method setVal = attr.getClass().getMethod("setValueAsString", String.class);
                     setVal.invoke(attr, updated);
