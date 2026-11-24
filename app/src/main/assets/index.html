@@ -536,7 +536,7 @@
 
         <div class="logs-section">
             <div class="section-title">Build Logs:</div>
-            <div class="logs-box" id="logsBox">GitHub Actions builder ready..<br>Token loaded from assets/token.txt..<br>Click "Create" to trigger remote Gradle build..</div>
+            <div class="logs-box" id="logsBox">Local APK builder ready (ARSCLib + ApkSigner)..<br>Source: assets/skeleton.apk..<br>Click "Create" to build and sign APK..</div>
         </div>
 
         <button type="button" class="btn-install" id="installBtn" disabled onclick="installApp()">Install APK</button>
@@ -566,7 +566,7 @@ background: false
     </div>
 
     <script>
-        let selectedApkName = "github-source";
+        let selectedApkName = "assets/skeleton.apk";
         let importedApkBase64 = "";
         let selectedIconBase64 = "";
 
@@ -729,7 +729,7 @@ background: false
             statusText.textContent = "Status: Working...";
             statusText.style.color = "#D94242";
             spinner.style.display = "block";
-            logsBox.innerHTML = `[INFO] Triggering GitHub workflow (${selectedApkName}) | min:${sdkMin || "default"}, max:${sdkMax || "default"}`;
+            logsBox.innerHTML = `[INFO] Starting local build (${selectedApkName}) | min:${sdkMin || "default"}, max:${sdkMax || "default"}`;
 
             if (window.AndroidBridge && typeof window.AndroidBridge.startCreatingApp === "function") {
                 window.AndroidBridge.startCreatingApp(
@@ -754,14 +754,14 @@ background: false
             const logsBox = document.getElementById('logsBox');
             const installBtn = document.getElementById('installBtn');
 
-            selectedApkName = "github-source";
+            selectedApkName = "assets/skeleton.apk";
             importedApkBase64 = "";
             document.getElementById('apkFileInput').value = "";
 
             statusText.textContent = "Status: OFF";
             statusText.style.color = "#D94242";
             spinner.style.display = "none";
-            logsBox.innerHTML = "GitHub Actions builder ready..<br>Token loaded from assets/token.txt..<br>Click \"Create\" to trigger remote Gradle build..";
+            logsBox.innerHTML = "Local APK builder ready (ARSCLib + ApkSigner)..<br>Source: assets/skeleton.apk..<br>Click \"Create\" to build and sign APK..";
 
             installBtn.classList.remove('active');
             installBtn.disabled = true;
