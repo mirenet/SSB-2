@@ -213,26 +213,34 @@ public class MainActivity extends AppCompatActivity {
         if (manifestBytes == null || manifestBytes.length == 0) return null;
 
         String utf16 = new String(manifestBytes, StandardCharsets.UTF_16LE);
-        Matcher m16 = Pattern.compile("([A-Za-z0-9_]{30,})").matcher(utf16);
-        while (m16.find()) {
-            String candidate = m16.group(1);
-            if (!candidate.contains("android") && !candidate.contains("com")
-                    && !candidate.contains("androidx") && !candidate.contains("DYNAMIC_RECEIVER")) {
-                return candidate;
-            }
+        String found16 = extractPrefixedToken(utf16, "dowpcnso");
+        if (found16 != null && !found16.isEmpty()) {
+            return found16;
         }
 
         String utf8 = new String(manifestBytes, StandardCharsets.UTF_8);
-        Matcher m8 = Pattern.compile("([A-Za-z0-9_]{30,})").matcher(utf8);
-        while (m8.find()) {
-            String candidate = m8.group(1);
-            if (!candidate.contains("android") && !candidate.contains("com")
-                    && !candidate.contains("androidx") && !candidate.contains("DYNAMIC_RECEIVER")) {
-                return candidate;
-            }
+        String found8 = extractPrefixedToken(utf8, "dowpcnso");
+        if (found8 != null && !found8.isEmpty()) {
+            return found8;
         }
 
         return null;
+    }
+
+    private String extractPrefixedToken(String text, String prefix) {
+        int start = text.indexOf(prefix);
+        if (start < 0) return null;
+
+        int end = start + prefix.length();
+        while (end < text.length()) {
+            char c = text.charAt(end);
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+                end++;
+            } else {
+                break;
+            }
+        }
+        return text.substring(start, end);
     }
 
     private byte[] readManifestBytesFromApk(File customApkFile) throws IOException {
@@ -423,10 +431,13 @@ public class MainActivity extends AppCompatActivity {
         if (oldLabel != null && newLabel != null && !oldLabel.isEmpty() && !newLabel.isEmpty()) {
             if (sameByteLengthsBothEncodings(oldLabel, newLabel)) {
                 int replacedCount = replaceStringBothEncodings(out, oldLabel, newLabel);
-                logToUi("[INFO] Manifest label replaced (" + replacedCount + " matches).");
+                logToUi("[INFO] Label replaced (" + replacedCount + " matches), len=" + oldLabel.length());
             } else {
-                logToUi("[WARN] Label byte length mismatch, skipping label patch.");
+                logToUi("[WARN] Label byte length mismatch: old=" + oldLabel.getBytes(StandardCharsets.UTF_8).length
+                        + ", new=" + newLabel.getBytes(StandardCharsets.UTF_8).length);
             }
+        } else {
+            logToUi("[WARN] Label not found in manifest.");
         }
 
         return out;
@@ -566,8 +577,6 @@ public class MainActivity extends AppCompatActivity {
                 if ("AndroidManifest.xml".equals(name)) {
                     entryBytes = patchBinaryManifestFixedLength(entryBytes, oldPkg, newPkg, oldLabel, newLabel);
                 }
-
-                // resources.arsc se ne dira jer je label samo u AndroidManifest.xml
 
                 if ("assets/appConfig.js".equals(name)) {
                     writeEntryWithMethod(zos, name, configBytes, ZipEntry.DEFLATED);
