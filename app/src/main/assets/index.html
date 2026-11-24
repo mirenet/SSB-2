@@ -570,34 +570,55 @@ background: false
         let importedApkBase64 = "";
         let selectedIconBase64 = "";
         let maxPackageLength = null;
+        let maxLabelLength = null;
 
-        function applyPackageLengthLimit(length) {
-            if (typeof length === "number" && length > 0) {
-                maxPackageLength = length;
+        function applyLimits(pkgLen, labelLen) {
+            if (typeof pkgLen === "number" && pkgLen > 0) {
+                maxPackageLength = pkgLen;
+                const pkgInput = document.getElementById('appPackage');
+                if (pkgInput) {
+                    pkgInput.maxLength = maxPackageLength;
+                    if (pkgInput.value.length > maxPackageLength) {
+                        pkgInput.value = pkgInput.value.slice(0, maxPackageLength);
+                    }
+                }
             }
-            const pkgInput = document.getElementById('appPackage');
-            if (!pkgInput || typeof maxPackageLength !== "number") return;
-            pkgInput.maxLength = maxPackageLength;
-            if (pkgInput.value.length > maxPackageLength) {
-                pkgInput.value = pkgInput.value.slice(0, maxPackageLength);
+
+            if (typeof labelLen === "number" && labelLen > 0) {
+                maxLabelLength = labelLen;
+                const nameInput = document.getElementById('appName');
+                if (nameInput) {
+                    nameInput.maxLength = maxLabelLength;
+                    if (nameInput.value.length > maxLabelLength) {
+                        nameInput.value = nameInput.value.slice(0, maxLabelLength);
+                    }
+                }
             }
         }
 
-        function enforcePackageLength() {
+        function enforceInputLimits() {
             const pkgInput = document.getElementById('appPackage');
-            if (!pkgInput || typeof maxPackageLength !== "number") return;
-            if (pkgInput.value.length > maxPackageLength) {
+            if (pkgInput && typeof maxPackageLength === "number" && pkgInput.value.length > maxPackageLength) {
                 pkgInput.value = pkgInput.value.slice(0, maxPackageLength);
+            }
+
+            const nameInput = document.getElementById('appName');
+            if (nameInput && typeof maxLabelLength === "number" && nameInput.value.length > maxLabelLength) {
+                nameInput.value = nameInput.value.slice(0, maxLabelLength);
             }
         }
 
         window.addEventListener('DOMContentLoaded', () => {
             const pkgInput = document.getElementById('appPackage');
+            const nameInput = document.getElementById('appName');
+
             if (pkgInput) {
-                pkgInput.addEventListener('input', enforcePackageLength);
-                pkgInput.addEventListener('paste', () => {
-                    setTimeout(enforcePackageLength, 0);
-                });
+                pkgInput.addEventListener('input', enforceInputLimits);
+                pkgInput.addEventListener('paste', () => setTimeout(enforceInputLimits, 0));
+            }
+            if (nameInput) {
+                nameInput.addEventListener('input', enforceInputLimits);
+                nameInput.addEventListener('paste', () => setTimeout(enforceInputLimits, 0));
             }
 
             const savedConfig = localStorage.getItem('appConfigText');
@@ -615,20 +636,22 @@ background: false
             }
         });
 
-        function setApkMetadata(appName, packageName) {
-            const nameInput = document.getElementById('appName');
-            const pkgInput = document.getElementById('appPackage');
+        // Prvi argument može biti broj karaktera labela (npr. 3) ili string labela; drugi je packageName.
+        function setApkMetadata(labelInfo, packageName) {
+            let pkgLen = null;
+            let lblLen = null;
 
             if (typeof packageName === "string" && packageName.trim().length > 0) {
-                const cleanPkg = packageName.trim();
-                applyPackageLengthLimit(cleanPkg.length);
-                if (pkgInput.value.length > maxPackageLength) {
-                    pkgInput.value = pkgInput.value.slice(0, maxPackageLength);
-                }
+                pkgLen = packageName.trim().length;
             }
-            if (typeof appName === "string" && appName.length > 0) {
-                nameInput.value = appName;
+
+            if (typeof labelInfo === "number" && labelInfo > 0) {
+                lblLen = labelInfo;
+            } else if (typeof labelInfo === "string" && labelInfo.trim().length > 0) {
+                lblLen = labelInfo.trim().length;
             }
+
+            applyLimits(pkgLen, lblLen);
         }
 
         function setDefaultConfigContent(configText) {
@@ -743,17 +766,18 @@ background: false
 
         function startBuild() {
             syncUrlIntoConfigTextarea();
-            enforcePackageLength();
+            enforceInputLimits();
 
             const statusText = document.getElementById('statusText');
             const spinner = document.getElementById('spinner');
             const logsBox = document.getElementById('logsBox');
             const installBtn = document.getElementById('installBtn');
 
-            const appName = document.getElementById('appName').value.trim();
-            const appPackage = typeof maxPackageLength === "number"
-                ? document.getElementById('appPackage').value.trim().slice(0, maxPackageLength)
-                : document.getElementById('appPackage').value.trim();
+            const rawName = document.getElementById('appName').value.trim();
+            const rawPkg = document.getElementById('appPackage').value.trim();
+
+            const appName = typeof maxLabelLength === "number" ? rawName.slice(0, maxLabelLength) : rawName;
+            const appPackage = typeof maxPackageLength === "number" ? rawPkg.slice(0, maxPackageLength) : rawPkg;
             const appUrl = document.getElementById('appUrl').value.trim();
             const configContent = document.getElementById('configContent').value;
             const sdkMin = document.getElementById('sdkMin').value.trim();
