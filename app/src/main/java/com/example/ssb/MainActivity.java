@@ -11,6 +11,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
+import android.util.Log;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -58,10 +59,14 @@ import java.util.zip.ZipOutputStream;
 
 public class MainActivity extends AppCompatActivity {
 
+    private static final String TAG = "SSB_ApkBuilder";
     private static final int FILE_CHOOSER_RESULT_CODE = 1;
     private static final String SKELETON_ASSET_NAME = "skeleton.apk";
     private static final String KEY_FILE_NAME = "ssb_signer_key.pk8";
     private static final String CERT_FILE_NAME = "ssb_signer_cert.der";
+
+    // Dozvoljava samo slova (uključujući naša slova ako treba, ovde A-Za-z) bez brojeva, razmaka i znakova
+    private static final Pattern LABEL_LETTERS_ONLY_PATTERN = Pattern.compile("^[A-Za-z]+$");
 
     private static final String FALLBACK_CONFIG =
             "const config = {\n" +
@@ -265,6 +270,12 @@ public class MainActivity extends AppCompatActivity {
                 throw new IllegalArgumentException("Invalid package name (e.g. com.example.myapp).");
             }
 
+            // Ograničenje labela na čista slova (bez razmaka, brojeva i specijalnih znakova)
+            String cleanLabel = appName != null ? appName.trim() : "";
+            if (!cleanLabel.isEmpty() && !LABEL_LETTERS_ONLY_PATTERN.matcher(cleanLabel).matches()) {
+                throw new IllegalArgumentException("App name must contain letters only (A-Z, a-z).");
+            }
+
             File workDir = new File(getCacheDir(), "local_build");
             if (workDir.exists()) {
                 deleteRecursive(workDir);
@@ -280,12 +291,11 @@ public class MainActivity extends AppCompatActivity {
             byte[] originalManifest = readManifestBytesFromApk(sourceApk);
             String currentLabel = detectCurrentLabel(originalManifest);
 
-            if (appName != null && !appName.isEmpty() && currentLabel != null) {
-                if (appName.length() != currentLabel.length()) {
-                    logToUi("[WARN] Label '" + currentLabel + "' has " + currentLabel.length()
-                            + " chars, but entered name '" + appName + "' has " + appName.length()
-                            + " chars — binary string pool cannot change byte length in-place.");
-                }
+            if (!cleanLabel.isEmpty() && currentLabel != null && cleanLabel.length() != currentLabel.length()) {
+                logToUi("[WARN] Label '" + currentLabel + "' has " + currentLabel.length()
+                        + " letters, but '" + cleanLabel + "' has " + cleanLabel.length()
+                        + " letters — skipping label change so binary manifest stays valid.");
+                cleanLabel = "";
             }
 
             if (buildCancelled) return;
@@ -293,13 +303,14 @@ public class MainActivity extends AppCompatActivity {
             byte[] iconBytes = decodeBase64Image(iconBase64);
             byte[] configBytes = buildFinalConfigBytes(configContent, startUrl);
 
-            logToUi("[INFO] Updating AndroidManifest, resources.arsc, assets/appConfig.js and icons..");
-            updateZipEntries(sourceApk, rawPackagedApk, configBytes, iconBytes, oldPackage, packageName, currentLabel, appName);
+            logToUi("[INFO] Updating AndroidManifest, assets/appConfig.js and icons (resources.arsc untouched)..");
+            updateZipEntries(sourceApk, rawPackagedApk, configBytes, iconBytes, oldPackage, packageName, currentLabel, cleanLabel);
 
             if (buildCancelled) return;
 
             logToUi("[INFO] Signing APK with Google ApkSigner..");
-            signApkWithGoogleApksig(rawPackagedApk, signedOutApk);
+            int minSdkInt = parseSdkOrDefault(sdkMin, 24);
+            signApkWithGoogleApksig(rawPackagedApk, signedOutApk, minSdkInt);
 
             logToUi("[SUCCESS] Signed APK ready: " + signedOutApk.getAbsolutePath());
             setReadyUi();
@@ -308,12 +319,42 @@ public class MainActivity extends AppCompatActivity {
                 logToUi("[INFO] Build cancelled.");
                 return;
             }
-            e.printStackTrace();
-            String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            Log.e(TAG, "Build/Sign failed", e);
+            String msg = buildDetailedErrorMessage(e);
             setErrorUi(msg);
         }
     }
 
+    private int parseSdkOrDefault(String sdkStr, int fallback) {
+        if (sdkStr == null || sdkStr.trim().isEmpty()) return fallback;
+        try {
+            int val = Integer.parseInt(sdkStr.trim());
+            return val > 0 ? val : fallback;
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private String buildDetailedErrorMessage(Throwable e) {
+        StringBuilder sb = new StringBuilder();
+        Throwable curr = e;
+        while (curr != null) {
+            if (sb.length() > 0) sb.append(" -> ");
+            String m = curr.getMessage();
+            sb.append(curr.getClass().getSimpleName());
+            if (m != null && !m.trim().isEmpty()) {
+                sb.append(": ").append(m.trim());
+            }
+            curr = curr.getCause();
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Menja samo package reference i (ako je iste dužine i od slova) label u manifestu.
+     * Nikad ne dira nazive klasa/servisa (npr. .MainActivity, .MediaService, InitializationProvider, itd.)
+     * i nikad ne dira resources.arsc.
+     */
     private byte[] patchBinaryManifestFixedLength(
             byte[] manifestBytes,
             String oldPkg,
@@ -325,69 +366,42 @@ public class MainActivity extends AppCompatActivity {
         byte[] out = manifestBytes.clone();
 
         if (oldPkg != null && newPkg != null && !oldPkg.isEmpty() && !newPkg.isEmpty() && !oldPkg.equals(newPkg)) {
-            String paddedNewPkg = padPackageToExactLength(newPkg, oldPkg.length());
-            replaceStringBothEncodings(out, oldPkg, paddedNewPkg);
-
-            String[] suffixes = new String[]{
-                    ".DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
-                    ".androidx-startup"
-            };
-            for (String suffix : suffixes) {
-                replaceStringBothEncodings(out, oldPkg + suffix, paddedNewPkg + suffix);
-            }
-
-            replaceStringBothEncodings(out, paddedNewPkg + ".MainActivity", oldPkg + ".MainActivity");
-            replaceStringBothEncodings(out, paddedNewPkg + ".MediaService", oldPkg + ".MediaService");
-        }
-
-        if (oldLabel != null && newLabel != null && !oldLabel.isEmpty() && !newLabel.isEmpty()) {
-            if (oldLabel.length() == newLabel.length()) {
-                int replacedCount = replaceStringBothEncodings(out, oldLabel, newLabel);
-                logToUi("[INFO] Manifest label '" + oldLabel + "' -> '" + newLabel + "' replaced (" + replacedCount + " matches).");
+            if (oldPkg.length() != newPkg.length()) {
+                logToUi("[WARN] Package length differs (" + oldPkg.length() + " vs " + newPkg.length()
+                        + "). Keeping original package '" + oldPkg + "' to avoid breaking manifest.");
             } else {
-                logToUi("[WARN] Label length mismatch: '" + oldLabel + "' (" + oldLabel.length()
-                        + ") vs '" + newLabel + "' (" + newLabel.length() + ").");
+                // Menjamo samo tačno oldPkg i poznate prefikse koji ne diraju klase/servise
+                replaceStringBothEncodings(out, oldPkg, newPkg);
+
+                String[] safeSuffixes = new String[]{
+                        ".DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
+                        ".androidx-startup"
+                };
+                for (String suffix : safeSuffixes) {
+                    replaceStringBothEncodings(out, oldPkg + suffix, newPkg + suffix);
+                }
+
+                // Eksplicitna zaštita da klase/servisi ostanu netaknuti u slučaju da je nešto zakačeno
+                replaceStringBothEncodings(out, newPkg + ".MainActivity", oldPkg + ".MainActivity");
+                replaceStringBothEncodings(out, newPkg + ".MediaService", oldPkg + ".MediaService");
             }
         }
 
+        if (oldLabel != null && newLabel != null
+                && !oldLabel.isEmpty() && !newLabel.isEmpty()
+                && LABEL_LETTERS_ONLY_PATTERN.matcher(newLabel).matches()
+                && oldLabel.length() == newLabel.length()) {
+            int replacedCount = replaceStringBothEncodings(out, oldLabel, newLabel);
+            logToUi("[INFO] Manifest label '" + oldLabel + "' -> '" + newLabel + "' replaced (" + replacedCount + " matches).");
+        }
+
         return out;
-    }
-
-    private byte[] patchBinaryStringPoolFixedLength(byte[] rawBytes, String oldText, String newText) {
-        if (rawBytes == null || oldText == null || newText == null
-                || oldText.isEmpty() || newText.isEmpty() || oldText.equals(newText)) {
-            return rawBytes;
-        }
-        if (oldText.length() != newText.length()) {
-            return rawBytes;
-        }
-        byte[] out = rawBytes.clone();
-        int count = replaceStringBothEncodings(out, oldText, newText);
-        if (count > 0) {
-            logToUi("[INFO] resources.arsc label '" + oldText + "' -> '" + newText + "' replaced (" + count + " matches).");
-        }
-        return out;
-    }
-
-    private String padPackageToExactLength(String pkg, int targetLen) {
-        if (pkg.length() == targetLen) return pkg;
-        if (pkg.length() > targetLen) return pkg.substring(0, targetLen);
-
-        int missing = targetLen - pkg.length();
-        StringBuilder pad = new StringBuilder();
-        for (int i = 0; i < missing; i++) {
-            pad.append('a');
-        }
-
-        int lastDot = pkg.lastIndexOf('.');
-        if (lastDot > 0 && lastDot < pkg.length() - 1) {
-            return pkg.substring(0, lastDot) + pad + pkg.substring(lastDot);
-        }
-        return pkg + pad;
     }
 
     private int replaceStringBothEncodings(byte[] data, String oldStr, String newStr) {
-        if (oldStr.length() != newStr.length()) return 0;
+        if (oldStr == null || newStr == null || oldStr.length() != newStr.length() || oldStr.isEmpty()) {
+            return 0;
+        }
         int total = 0;
 
         byte[] oldUtf16 = oldStr.getBytes(StandardCharsets.UTF_16LE);
@@ -510,9 +524,7 @@ public class MainActivity extends AppCompatActivity {
                     entryBytes = patchBinaryManifestFixedLength(entryBytes, oldPkg, newPkg, oldLabel, newLabel);
                 }
 
-                if ("resources.arsc".equals(name)) {
-                    entryBytes = patchBinaryStringPoolFixedLength(entryBytes, oldLabel, newLabel);
-                }
+                // resources.arsc se namerno ne dira
 
                 if ("assets/appConfig.js".equals(name)) {
                     writeEntryWithMethod(zos, name, configBytes, ZipEntry.DEFLATED);
@@ -563,21 +575,33 @@ public class MainActivity extends AppCompatActivity {
         zos.closeEntry();
     }
 
-    private void signApkWithGoogleApksig(File inputApk, File outputApk) throws Exception {
+    private void signApkWithGoogleApksig(File inputApk, File outputApk, int minSdkVersion) throws Exception {
+        if (outputApk.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            outputApk.delete();
+        }
+
         SignerCredentials creds = getOrCreateSignerCredentials();
 
         ApkSigner.SignerConfig signerConfig = new ApkSigner.SignerConfig.Builder(
                 "ssb_signer", creds.privateKey, Collections.singletonList(creds.certificate))
                 .build();
 
-        new ApkSigner.Builder(Collections.singletonList(signerConfig))
-                .setInputApk(inputApk)
-                .setOutputApk(outputApk)
-                .setV1SigningEnabled(true)
-                .setV2SigningEnabled(true)
-                .setV3SigningEnabled(true)
-                .build()
-                .sign();
+        try {
+            new ApkSigner.Builder(Collections.singletonList(signerConfig))
+                    .setInputApk(inputApk)
+                    .setOutputApk(outputApk)
+                    .setMinSdkVersion(minSdkVersion)
+                    .setV1SigningEnabled(true)
+                    .setV2SigningEnabled(true)
+                    .setV3SigningEnabled(true)
+                    .build()
+                    .sign();
+        } catch (Exception e) {
+            Log.e(TAG, "ApkSigner failed", e);
+            logToUi("[ERROR] ApkSigner failed: " + buildDetailedErrorMessage(e));
+            throw e;
+        }
     }
 
     private static class SignerCredentials {
@@ -604,7 +628,8 @@ public class MainActivity extends AppCompatActivity {
                         .generateCertificate(new ByteArrayInputStream(certBytes));
                 cert.checkValidity(new Date());
                 return new SignerCredentials(privateKey, cert);
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                Log.w(TAG, "Cached signer credentials invalid, regenerating", e);
                 //noinspection ResultOfMethodCallIgnored
                 keyFile.delete();
                 //noinspection ResultOfMethodCallIgnored
