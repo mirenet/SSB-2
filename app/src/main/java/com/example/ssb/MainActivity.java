@@ -10,8 +10,6 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.security.keystore.KeyGenParameterSpec;
-import android.security.keystore.KeyProperties;
 import android.util.Base64;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
@@ -25,9 +23,13 @@ import androidx.core.content.FileProvider;
 import com.android.apksig.ApkSigner;
 import com.reandroid.apk.ApkModule;
 import com.reandroid.app.AndroidManifest;
+import com.reandroid.arsc.chunk.xml.ResXmlAttribute;
+import com.reandroid.arsc.chunk.xml.ResXmlElement;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -36,26 +38,31 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.KeyPair;
 import java.security.KeyPairGenerator;
-import java.security.KeyStore;
 import java.security.PrivateKey;
+import java.security.Signature;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.util.Calendar;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.text.SimpleDateFormat;
 import java.util.Collections;
+import java.util.Date;
 import java.util.Locale;
+import java.util.TimeZone;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
-import javax.security.auth.x500.X500Principal;
-
 public class MainActivity extends AppCompatActivity {
 
     private static final int FILE_CHOOSER_RESULT_CODE = 1;
     private static final String SKELETON_ASSET_NAME = "skeleton.apk";
-    private static final String TEST_KEY_ALIAS = "ssb_test_key";
+    private static final String KEY_FILE_NAME = "ssb_signer_key.pk8";
+    private static final String CERT_FILE_NAME = "ssb_signer_cert.der";
 
     private static final String FALLBACK_CONFIG =
             "const config = {\n" +
@@ -198,6 +205,10 @@ public class MainActivity extends AppCompatActivity {
                 AndroidManifest manifest = module.getAndroidManifest();
                 manifest.setPackageName(packageName);
 
+                if (appName != null && !appName.isEmpty()) {
+                    applyApplicationLabel(manifest, appName);
+                }
+
                 if (sdkMin != null && !sdkMin.isEmpty()) {
                     try {
                         manifest.setMinSdkVersion(Integer.parseInt(sdkMin));
@@ -224,12 +235,12 @@ public class MainActivity extends AppCompatActivity {
             byte[] iconBytes = decodeBase64Image(iconBase64);
             byte[] configBytes = buildFinalConfigBytes(configContent, startUrl);
 
-            logToUi("[INFO] Updating assets/appConfig.js and icon entries..");
+            logToUi("[INFO] Updating assets/appConfig.js, mipmap and drawable entries..");
             updateZipEntries(arscModifiedApk, rawPackagedApk, configBytes, iconBytes);
 
             if (buildCancelled) return;
 
-            logToUi("[INFO] Signing APK with Google ApkSigner (test key)..");
+            logToUi("[INFO] Signing APK with Google ApkSigner..");
             signApkWithGoogleApksig(rawPackagedApk, signedOutApk);
 
             logToUi("[SUCCESS] Signed APK ready: " + signedOutApk.getAbsolutePath());
@@ -241,6 +252,24 @@ public class MainActivity extends AppCompatActivity {
             }
             e.printStackTrace();
             setErrorUi(e.getMessage() != null ? e.getMessage() : "Local APK build/sign failed.");
+        }
+    }
+
+    private void applyApplicationLabel(AndroidManifest manifest, String appName) {
+        try {
+            ResXmlElement appElem = manifest.getApplicationElement();
+            if (appElem != null) {
+                ResXmlAttribute labelAttr = appElem.getAndroidAttribute(AndroidManifest.NAME_label);
+                if (labelAttr != null) {
+                    labelAttr.setValueAsString(appName);
+                } else {
+                    appElem.getOrCreateAndroidAttribute(
+                            AndroidManifest.NAME_label,
+                            AndroidManifest.ID_label
+                    ).setValueAsString(appName);
+                }
+            }
+        } catch (Throwable ignored) {
         }
     }
 
@@ -298,9 +327,10 @@ public class MainActivity extends AppCompatActivity {
 
             while ((entry = zis.getNextEntry()) != null) {
                 String name = entry.getName();
+                String lower = name.toLowerCase(Locale.US);
 
                 if (name.startsWith("META-INF/") && (
-                        name.endsWith(".SF") || name.endsWith(".RSA") || name.endsWith(".DSA") || name.endsWith(".EC")
+                        lower.endsWith(".sf") || lower.endsWith(".rsa") || lower.endsWith(".dsa") || lower.endsWith(".ec")
                 )) {
                     zis.closeEntry();
                     continue;
@@ -315,7 +345,12 @@ public class MainActivity extends AppCompatActivity {
                     continue;
                 }
 
-                if (iconBytes != null && name.startsWith("res/mipmap-") && name.toLowerCase(Locale.US).endsWith(".png")) {
+                boolean isMipmapPng = name.startsWith("res/mipmap-") && lower.endsWith(".png");
+                boolean isTargetDrawablePng = name.startsWith("res/drawable")
+                        && lower.endsWith(".png")
+                        && (lower.contains("/logo") || lower.contains("/back"));
+
+                if (iconBytes != null && (isMipmapPng || isTargetDrawablePng)) {
                     zos.putNextEntry(new ZipEntry(name));
                     zos.write(iconBytes);
                     zos.closeEntry();
@@ -343,40 +378,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void signApkWithGoogleApksig(File inputApk, File outputApk) throws Exception {
-        KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
-        keyStore.load(null);
-
-        if (!keyStore.containsAlias(TEST_KEY_ALIAS)) {
-            Calendar start = Calendar.getInstance();
-            Calendar end = Calendar.getInstance();
-            end.add(Calendar.YEAR, 25);
-
-            KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(
-                    TEST_KEY_ALIAS,
-                    KeyProperties.PURPOSE_SIGN)
-                    .setCertificateSubject(new X500Principal("CN=SSB Test Signer"))
-                    .setCertificateSerialNumber(BigInteger.ONE)
-                    .setCertificateNotBefore(start.getTime())
-                    .setCertificateNotAfter(end.getTime())
-                    .setDigests(KeyProperties.DIGEST_SHA256)
-                    .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
-                    .build();
-
-            KeyPairGenerator kpg = KeyPairGenerator.getInstance(
-                    KeyProperties.KEY_ALGORITHM_RSA, "AndroidKeyStore");
-            kpg.initialize(spec);
-            kpg.generateKeyPair();
-        }
-
-        PrivateKey privateKey = (PrivateKey) keyStore.getKey(TEST_KEY_ALIAS, null);
-        X509Certificate cert = (X509Certificate) keyStore.getCertificate(TEST_KEY_ALIAS);
-
-        if (privateKey == null || cert == null) {
-            throw new IllegalStateException("Failed to load test key or certificate.");
-        }
+        SignerCredentials creds = getOrCreateSignerCredentials();
 
         ApkSigner.SignerConfig signerConfig = new ApkSigner.SignerConfig.Builder(
-                "test_signer", privateKey, Collections.singletonList(cert))
+                "ssb_signer", creds.privateKey, Collections.singletonList(creds.certificate))
                 .build();
 
         new ApkSigner.Builder(Collections.singletonList(signerConfig))
@@ -387,6 +392,190 @@ public class MainActivity extends AppCompatActivity {
                 .setV3SigningEnabled(true)
                 .build()
                 .sign();
+    }
+
+    private static class SignerCredentials {
+        final PrivateKey privateKey;
+        final X509Certificate certificate;
+
+        SignerCredentials(PrivateKey privateKey, X509Certificate certificate) {
+            this.privateKey = privateKey;
+            this.certificate = certificate;
+        }
+    }
+
+    private SignerCredentials getOrCreateSignerCredentials() throws Exception {
+        File keyFile = new File(getFilesDir(), KEY_FILE_NAME);
+        File certFile = new File(getFilesDir(), CERT_FILE_NAME);
+
+        if (keyFile.exists() && certFile.exists()) {
+            byte[] keyBytes = readStreamToBytes(new FileInputStream(keyFile));
+            byte[] certBytes = readStreamToBytes(new FileInputStream(certFile));
+            PrivateKey privateKey = KeyFactory.getInstance("RSA")
+                    .generatePrivate(new PKCS8EncodedKeySpec(keyBytes));
+            X509Certificate cert = (X509Certificate) CertificateFactory.getInstance("X.509")
+                    .generateCertificate(new ByteArrayInputStream(certBytes));
+            return new SignerCredentials(privateKey, cert);
+        }
+
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048);
+        KeyPair keyPair = kpg.generateKeyPair();
+        X509Certificate cert = generateSelfSignedCert(keyPair);
+
+        try (FileOutputStream fos = new FileOutputStream(keyFile)) {
+            fos.write(keyPair.getPrivate().getEncoded());
+        }
+        try (FileOutputStream fos = new FileOutputStream(certFile)) {
+            fos.write(cert.getEncoded());
+        }
+
+        return new SignerCredentials(keyPair.getPrivate(), cert);
+    }
+
+    private X509Certificate generateSelfSignedCert(KeyPair keyPair) throws Exception {
+        long nowMs = System.currentTimeMillis();
+        Date notBefore = new Date(nowMs - 24L * 60 * 60 * 1000);
+        Date notAfter = new Date(nowMs + 25L * 365 * 24 * 60 * 60 * 1000);
+        BigInteger serial = BigInteger.valueOf(nowMs);
+
+        byte[] sigAlgId = derSequence(
+                derOid(new int[]{1, 2, 840, 113549, 1, 1, 11}),
+                derNull()
+        );
+        byte[] cnOid = derOid(new int[]{2, 5, 4, 3});
+        byte[] name = derSequence(derSet(derSequence(cnOid, derUtf8String("SSB Local Signer"))));
+        byte[] validity = derSequence(derUtcTime(notBefore), derUtcTime(notAfter));
+        byte[] subjectPublicKeyInfo = keyPair.getPublic().getEncoded();
+        byte[] version = derContextTag(0, derInteger(BigInteger.valueOf(2)));
+
+        byte[] tbsCertificate = derSequence(
+                version,
+                derInteger(serial),
+                sigAlgId,
+                name,
+                validity,
+                name,
+                subjectPublicKeyInfo
+        );
+
+        Signature sig = Signature.getInstance("SHA256withRSA");
+        sig.initSign(keyPair.getPrivate());
+        sig.update(tbsCertificate);
+        byte[] signatureBytes = sig.sign();
+
+        byte[] certDer = derSequence(
+                tbsCertificate,
+                sigAlgId,
+                derBitString(signatureBytes)
+        );
+
+        return (X509Certificate) CertificateFactory.getInstance("X.509")
+                .generateCertificate(new ByteArrayInputStream(certDer));
+    }
+
+    private static byte[] derSequence(byte[]... items) throws IOException {
+        return derWrap(0x30, concatBytes(items));
+    }
+
+    private static byte[] derSet(byte[]... items) throws IOException {
+        return derWrap(0x31, concatBytes(items));
+    }
+
+    private static byte[] derContextTag(int tagNumber, byte[] content) throws IOException {
+        return derWrap(0xA0 | (tagNumber & 0x1F), content);
+    }
+
+    private static byte[] derNull() {
+        return new byte[]{0x05, 0x00};
+    }
+
+    private static byte[] derInteger(BigInteger val) throws IOException {
+        return derWrap(0x02, val.toByteArray());
+    }
+
+    private static byte[] derUtf8String(String s) throws IOException {
+        return derWrap(0x0C, s.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static byte[] derUtcTime(Date date) throws IOException {
+        SimpleDateFormat sdf = new SimpleDateFormat("yyMMddHHmmss'Z'", Locale.US);
+        sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
+        return derWrap(0x17, sdf.format(date).getBytes(StandardCharsets.US_ASCII));
+    }
+
+    private static byte[] derBitString(byte[] data) throws IOException {
+        byte[] withUnusedBits = new byte[data.length + 1];
+        withUnusedBits[0] = 0x00;
+        System.arraycopy(data, 0, withUnusedBits, 1, data.length);
+        return derWrap(0x03, withUnusedBits);
+    }
+
+    private static byte[] derOid(int[] arcs) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(arcs[0] * 40 + arcs[1]);
+        for (int i = 2; i < arcs.length; i++) {
+            writeBase128(out, arcs[i]);
+        }
+        return derWrap(0x06, out.toByteArray());
+    }
+
+    private static void writeBase128(ByteArrayOutputStream out, int value) {
+        if (value < 128) {
+            out.write(value);
+            return;
+        }
+        byte[] tmp = new byte[5];
+        int idx = tmp.length - 1;
+        tmp[idx] = (byte) (value & 0x7F);
+        value >>>= 7;
+        while (value > 0) {
+            idx--;
+            tmp[idx] = (byte) (0x80 | (value & 0x7F));
+            value >>>= 7;
+        }
+        out.write(tmp, idx, tmp.length - idx);
+    }
+
+    private static byte[] derWrap(int tag, byte[] content) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(tag);
+        int len = content.length;
+        if (len < 128) {
+            out.write(len);
+        } else {
+            byte[] lenBytes = new byte[4];
+            int pos = 3;
+            int temp = len;
+            while (temp > 0) {
+                lenBytes[pos--] = (byte) (temp & 0xFF);
+                temp >>>= 8;
+            }
+            int numOctets = 3 - pos;
+            out.write(0x80 | numOctets);
+            out.write(lenBytes, pos + 1, numOctets);
+        }
+        out.write(content);
+        return out.toByteArray();
+    }
+
+    private static byte[] concatBytes(byte[]... arrays) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (byte[] a : arrays) {
+            if (a != null) out.write(a);
+        }
+        return out.toByteArray();
+    }
+
+    private byte[] readStreamToBytes(InputStream in) throws IOException {
+        try (InputStream stream = in; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192];
+            int len;
+            while ((len = stream.read(buf)) != -1) {
+                out.write(buf, 0, len);
+            }
+            return out.toByteArray();
+        }
     }
 
     private File getOutputApkFile() {
