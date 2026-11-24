@@ -10,6 +10,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
 import android.util.Base64;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
@@ -26,7 +28,6 @@ import com.reandroid.app.AndroidManifest;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
-import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -35,17 +36,12 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
-import java.security.KeyFactory;
-import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.KeyStore;
 import java.security.PrivateKey;
-import java.security.PublicKey;
-import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.security.spec.PKCS8EncodedKeySpec;
-import java.security.spec.X509EncodedKeySpec;
+import java.util.Calendar;
 import java.util.Collections;
-import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,8 +55,7 @@ public class MainActivity extends AppCompatActivity {
 
     private static final int FILE_CHOOSER_RESULT_CODE = 1;
     private static final String SKELETON_ASSET_NAME = "skeleton.apk";
-    private static final String KEY_FILE_NAME = "ssb_signer_key.pk8";
-    private static final String CERT_FILE_NAME = "ssb_signer_cert.der";
+    private static final String TEST_KEY_ALIAS = "ssb_test_key";
 
     private static final String FALLBACK_CONFIG =
             "const config = {\n" +
@@ -234,7 +229,7 @@ public class MainActivity extends AppCompatActivity {
 
             if (buildCancelled) return;
 
-            logToUi("[INFO] Signing APK with Google ApkSigner..");
+            logToUi("[INFO] Signing APK with Google ApkSigner (test key)..");
             signApkWithGoogleApksig(rawPackagedApk, signedOutApk);
 
             logToUi("[SUCCESS] Signed APK ready: " + signedOutApk.getAbsolutePath());
@@ -348,10 +343,40 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void signApkWithGoogleApksig(File inputApk, File outputApk) throws Exception {
-        SignerCredentials creds = getOrCreateSignerCredentials();
+        KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
+        keyStore.load(null);
+
+        if (!keyStore.containsAlias(TEST_KEY_ALIAS)) {
+            Calendar start = Calendar.getInstance();
+            Calendar end = Calendar.getInstance();
+            end.add(Calendar.YEAR, 25);
+
+            KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(
+                    TEST_KEY_ALIAS,
+                    KeyProperties.PURPOSE_SIGN)
+                    .setCertificateSubject(new X500Principal("CN=SSB Test Signer"))
+                    .setCertificateSerialNumber(BigInteger.ONE)
+                    .setCertificateNotBefore(start.getTime())
+                    .setCertificateNotAfter(end.getTime())
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+                    .build();
+
+            KeyPairGenerator kpg = KeyPairGenerator.getInstance(
+                    KeyProperties.KEY_ALGORITHM_RSA, "AndroidKeyStore");
+            kpg.initialize(spec);
+            kpg.generateKeyPair();
+        }
+
+        PrivateKey privateKey = (PrivateKey) keyStore.getKey(TEST_KEY_ALIAS, null);
+        X509Certificate cert = (X509Certificate) keyStore.getCertificate(TEST_KEY_ALIAS);
+
+        if (privateKey == null || cert == null) {
+            throw new IllegalStateException("Failed to load test key or certificate.");
+        }
 
         ApkSigner.SignerConfig signerConfig = new ApkSigner.SignerConfig.Builder(
-                "ssb_signer", creds.privateKey, Collections.singletonList(creds.certificate))
+                "test_signer", privateKey, Collections.singletonList(cert))
                 .build();
 
         new ApkSigner.Builder(Collections.singletonList(signerConfig))
@@ -362,94 +387,6 @@ public class MainActivity extends AppCompatActivity {
                 .setV3SigningEnabled(true)
                 .build()
                 .sign();
-    }
-
-    private static class SignerCredentials {
-        final PrivateKey privateKey;
-        final X509Certificate certificate;
-
-        SignerCredentials(PrivateKey privateKey, X509Certificate certificate) {
-            this.privateKey = privateKey;
-            this.certificate = certificate;
-        }
-    }
-
-    private SignerCredentials getOrCreateSignerCredentials() throws Exception {
-        File keyFile = new File(getFilesDir(), KEY_FILE_NAME);
-        File certFile = new File(getFilesDir(), CERT_FILE_NAME);
-
-        if (keyFile.exists() && certFile.exists()) {
-            byte[] keyBytes = readAllBytes(keyFile);
-            byte[] certBytes = readAllBytes(certFile);
-            PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(keyBytes);
-            PrivateKey privateKey = KeyFactory.getInstance("RSA").generatePrivate(keySpec);
-            CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            X509Certificate cert = (X509Certificate) cf.generateCertificate(
-                    new java.io.ByteArrayInputStream(certBytes));
-            return new SignerCredentials(privateKey, cert);
-        }
-
-        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
-        kpg.initialize(2048);
-        KeyPair keyPair = kpg.generateKeyPair();
-        X509Certificate cert = generateSelfSignedCert(keyPair);
-
-        try (FileOutputStream fos = new FileOutputStream(keyFile)) {
-            fos.write(keyPair.getPrivate().getEncoded());
-        }
-        try (FileOutputStream fos = new FileOutputStream(certFile)) {
-            fos.write(cert.getEncoded());
-        }
-
-        return new SignerCredentials(keyPair.getPrivate(), cert);
-    }
-
-    private X509Certificate generateSelfSignedCert(KeyPair keyPair) throws Exception {
-        long now = System.currentTimeMillis();
-        Date notBefore = new Date(now - 24L * 60 * 60 * 1000);
-        Date notAfter = new Date(now + 10L * 365 * 24 * 60 * 60 * 1000);
-        BigInteger serial = BigInteger.valueOf(now);
-        X500Principal subject = new X500Principal("CN=SSB Local Signer, O=SSB, C=RS");
-
-        // Koristi ugrađeni BouncyCastle X509V3CertificateGenerator kad je dostupan na Androidu
-        try {
-            Class<?> genClass = Class.forName("org.bouncycastle.x509.X509V3CertificateGenerator");
-            Object gen = genClass.getConstructor().newInstance();
-            genClass.getMethod("setSerialNumber", BigInteger.class).invoke(gen, serial);
-            genClass.getMethod("setIssuerDN", X500Principal.class).invoke(gen, subject);
-            genClass.getMethod("setSubjectDN", X500Principal.class).invoke(gen, subject);
-            genClass.getMethod("setNotBefore", Date.class).invoke(gen, notBefore);
-            genClass.getMethod("setNotAfter", Date.class).invoke(gen, notAfter);
-            genClass.getMethod("setPublicKey", PublicKey.class).invoke(gen, keyPair.getPublic());
-            genClass.getMethod("setSignatureAlgorithm", String.class).invoke(gen, "SHA256withRSA");
-            return (X509Certificate) genClass
-                    .getMethod("generate", PrivateKey.class, String.class)
-                    .invoke(gen, keyPair.getPrivate(), "BC");
-        } catch (Throwable ignored) {
-            // Fallback ako BouncyCastle V3 klasa nije dostupna na određenom API nivou
-            byte[] encodedKey = keyPair.getPublic().getEncoded();
-            X509EncodedKeySpec spec = new X509EncodedKeySpec(encodedKey);
-            KeyFactory kf = KeyFactory.getInstance("RSA");
-            kf.generatePublic(spec);
-            throw new IllegalStateException("Cannot generate X509Certificate on this runtime without BouncyCastle V3 generator.");
-        }
-    }
-
-    private byte[] readAllBytes(File file) throws IOException {
-        try (InputStream in = new BufferedInputStream(new FileInputStream(file));
-             DataOutputStream ignored = null) {
-            byte[] buf = new byte[(int) file.length()];
-            int total = 0;
-            while (total < buf.length) {
-                int r = in.read(buf, total, buf.length - total);
-                if (r < 0) break;
-                total += r;
-            }
-            if (total == buf.length) return buf;
-            byte[] exact = new byte[total];
-            System.arraycopy(buf, 0, exact, 0, total);
-            return exact;
-        }
     }
 
     private File getOutputApkFile() {
