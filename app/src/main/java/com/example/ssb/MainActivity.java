@@ -64,9 +64,6 @@ public class MainActivity extends AppCompatActivity {
     private static final String SKELETON_ASSET_NAME = "skeleton.apk";
     private static final String KEY_FILE_NAME = "ssb_signer_key.pk8";
     private static final String CERT_FILE_NAME = "ssb_signer_cert.der";
-    private static final char INVISIBLE_PAD_CHAR = '\u200B';
-
-    private static final Pattern LABEL_LETTERS_ONLY_PATTERN = Pattern.compile("^[A-Za-z]+$");
 
     private static final String FALLBACK_CONFIG =
             "const config = {\n" +
@@ -258,14 +255,36 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private String padRightWithInvisible(String text, int targetLength) {
-        if (text == null || targetLength <= 0 || text.length() >= targetLength) {
-            return text;
+    /**
+     * Usklađuje tekst na tačan broj UTF-8 bajtova kao originalni string,
+     * koristeći jednobajtne ASCII karaktere ('a' za package, ' ' za label) da nikad ne pomeri bajtove.
+     */
+    private String fitToExactUtf8Bytes(String input, String reference, char asciiPadChar) {
+        if (input == null || reference == null || reference.isEmpty()) return input;
+        byte[] targetUtf8 = reference.getBytes(StandardCharsets.UTF_8);
+        int targetLen = targetUtf8.length;
+
+        StringBuilder sb = new StringBuilder();
+        int currentBytes = 0;
+
+        for (int i = 0; i < input.length(); i++) {
+            char ch = input.charAt(i);
+            int chBytes = String.valueOf(ch).getBytes(StandardCharsets.UTF_8).length;
+            if (currentBytes + chBytes > targetLen) {
+                break;
+            }
+            sb.append(ch);
+            currentBytes += chBytes;
         }
-        StringBuilder sb = new StringBuilder(text);
-        while (sb.length() < targetLength) {
-            sb.append(INVISIBLE_PAD_CHAR);
+
+        // asciiPadChar je uvek 1 bajt u UTF-8 i 2 bajta u UTF-16LE
+        String padStr = String.valueOf(asciiPadChar);
+        int padBytes = padStr.getBytes(StandardCharsets.UTF_8).length;
+        while (currentBytes + padBytes <= targetLen) {
+            sb.append(asciiPadChar);
+            currentBytes += padBytes;
         }
+
         return sb.toString();
     }
 
@@ -286,9 +305,6 @@ public class MainActivity extends AppCompatActivity {
             }
 
             String cleanLabel = appName != null ? appName.trim() : "";
-            if (!cleanLabel.isEmpty() && !LABEL_LETTERS_ONLY_PATTERN.matcher(cleanLabel).matches()) {
-                throw new IllegalArgumentException("App name must contain letters only (A-Z, a-z).");
-            }
 
             File workDir = new File(getCacheDir(), "local_build");
             if (workDir.exists()) {
@@ -307,22 +323,12 @@ public class MainActivity extends AppCompatActivity {
 
             String effectivePkg = packageName;
             if (oldPackage != null && !oldPackage.isEmpty()) {
-                if (effectivePkg.length() > oldPackage.length()) {
-                    effectivePkg = effectivePkg.substring(0, oldPackage.length());
-                } else if (effectivePkg.length() < oldPackage.length()) {
-                    effectivePkg = padRightWithInvisible(effectivePkg, oldPackage.length());
-                    logToUi("[INFO] Padded package name with invisible chars to length " + oldPackage.length() + ".");
-                }
+                effectivePkg = fitToExactUtf8Bytes(packageName, oldPackage, 'a');
             }
 
             String effectiveLabel = cleanLabel;
             if (!cleanLabel.isEmpty() && currentLabel != null && !currentLabel.isEmpty()) {
-                if (effectiveLabel.length() > currentLabel.length()) {
-                    effectiveLabel = effectiveLabel.substring(0, currentLabel.length());
-                } else if (effectiveLabel.length() < currentLabel.length()) {
-                    effectiveLabel = padRightWithInvisible(cleanLabel, currentLabel.length());
-                    logToUi("[INFO] Padded label with invisible chars to length " + currentLabel.length() + ".");
-                }
+                effectiveLabel = fitToExactUtf8Bytes(cleanLabel, currentLabel, ' ');
             }
 
             if (buildCancelled) return;
@@ -388,7 +394,7 @@ public class MainActivity extends AppCompatActivity {
         byte[] out = manifestBytes.clone();
 
         if (oldPkg != null && newPkg != null && !oldPkg.isEmpty() && !newPkg.isEmpty() && !oldPkg.equals(newPkg)) {
-            if (oldPkg.length() == newPkg.length()) {
+            if (sameByteLengthsBothEncodings(oldPkg, newPkg)) {
                 replaceStringBothEncodings(out, oldPkg, newPkg);
 
                 String[] safeSuffixes = new String[]{
@@ -401,21 +407,34 @@ public class MainActivity extends AppCompatActivity {
 
                 replaceStringBothEncodings(out, newPkg + ".MainActivity", oldPkg + ".MainActivity");
                 replaceStringBothEncodings(out, newPkg + ".MediaService", oldPkg + ".MediaService");
+            } else {
+                logToUi("[WARN] Package byte length mismatch, skipping package patch.");
             }
         }
 
         if (oldLabel != null && newLabel != null && !oldLabel.isEmpty() && !newLabel.isEmpty()) {
-            if (oldLabel.length() == newLabel.length()) {
+            if (sameByteLengthsBothEncodings(oldLabel, newLabel)) {
                 int replacedCount = replaceStringBothEncodings(out, oldLabel, newLabel);
                 logToUi("[INFO] Manifest label '" + oldLabel + "' -> '" + newLabel + "' replaced (" + replacedCount + " matches).");
+            } else {
+                logToUi("[WARN] Label byte length mismatch, skipping label patch.");
             }
         }
 
         return out;
     }
 
+    private boolean sameByteLengthsBothEncodings(String a, String b) {
+        if (a == null || b == null) return false;
+        byte[] aUtf8 = a.getBytes(StandardCharsets.UTF_8);
+        byte[] bUtf8 = b.getBytes(StandardCharsets.UTF_8);
+        byte[] aUtf16 = a.getBytes(StandardCharsets.UTF_16LE);
+        byte[] bUtf16 = b.getBytes(StandardCharsets.UTF_16LE);
+        return aUtf8.length == bUtf8.length && aUtf16.length == bUtf16.length;
+    }
+
     private int replaceStringBothEncodings(byte[] data, String oldStr, String newStr) {
-        if (oldStr == null || newStr == null || oldStr.length() != newStr.length() || oldStr.isEmpty()) {
+        if (oldStr == null || newStr == null || oldStr.isEmpty() || newStr.isEmpty()) {
             return 0;
         }
         int total = 0;
