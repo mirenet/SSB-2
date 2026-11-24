@@ -48,7 +48,6 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.text.SimpleDateFormat;
 import java.util.Collections;
 import java.util.Date;
-import java.util.List;
 import java.util.Locale;
 import java.util.TimeZone;
 import java.util.concurrent.ExecutorService;
@@ -204,15 +203,10 @@ public class MainActivity extends AppCompatActivity {
 
             if (module.hasAndroidManifest()) {
                 AndroidManifest manifest = module.getAndroidManifest();
-                String oldPackage = readCurrentPackageName(manifest);
                 manifest.setPackageName(packageName);
 
                 if (appName != null && !appName.isEmpty()) {
                     applyApplicationLabel(manifest, appName);
-                }
-
-                if (oldPackage != null && !oldPackage.isEmpty() && !oldPackage.equals(packageName)) {
-                    replaceOldPackageReferences(manifest, oldPackage, packageName);
                 }
 
                 if (sdkMin != null && !sdkMin.isEmpty()) {
@@ -258,80 +252,6 @@ public class MainActivity extends AppCompatActivity {
             }
             e.printStackTrace();
             setErrorUi(e.getMessage() != null ? e.getMessage() : "Local APK build/sign failed.");
-        }
-    }
-
-    private String readCurrentPackageName(AndroidManifest manifest) {
-        try {
-            Method m = manifest.getClass().getMethod("getPackageName");
-            Object val = m.invoke(manifest);
-            return val != null ? val.toString() : null;
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private void replaceOldPackageReferences(AndroidManifest manifest, String oldPkg, String newPkg) {
-        try {
-            Method getElem = manifest.getClass().getMethod("getResXmlElement");
-            Object rootElem = getElem.invoke(manifest);
-            if (rootElem != null) {
-                replaceInElementRecursive(rootElem, oldPkg, newPkg);
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void replaceInElementRecursive(Object elem, String oldPkg, String newPkg) {
-        if (elem == null) return;
-        try {
-            Method getAttrs = elem.getClass().getMethod("getAttributes");
-            Object attrsObj = getAttrs.invoke(elem);
-            if (attrsObj instanceof Iterable) {
-                for (Object attr : (Iterable<?>) attrsObj) {
-                    replaceInAttribute(attr, oldPkg, newPkg);
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-
-        try {
-            Method listAttrs = elem.getClass().getMethod("listAttributes");
-            Object attrsObj = listAttrs.invoke(elem);
-            if (attrsObj instanceof Iterable) {
-                for (Object attr : (Iterable<?>) attrsObj) {
-                    replaceInAttribute(attr, oldPkg, newPkg);
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-
-        try {
-            Method getElements = elem.getClass().getMethod("getElements");
-            Object elemsObj = getElements.invoke(elem);
-            if (elemsObj instanceof Iterable) {
-                for (Object child : (Iterable<?>) elemsObj) {
-                    replaceInElementRecursive(child, oldPkg, newPkg);
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void replaceInAttribute(Object attr, String oldPkg, String newPkg) {
-        if (attr == null) return;
-        try {
-            Method getVal = attr.getClass().getMethod("getValueAsString");
-            Object valObj = getVal.invoke(attr);
-            if (valObj instanceof String) {
-                String val = (String) valObj;
-                if (val.contains(oldPkg)) {
-                    String updated = val.replace(oldPkg, newPkg);
-                    Method setVal = attr.getClass().getMethod("setValueAsString", String.class);
-                    setVal.invoke(attr, updated);
-                }
-            }
-        } catch (Throwable ignored) {
         }
     }
 
@@ -436,7 +356,7 @@ public class MainActivity extends AppCompatActivity {
                 byte[] entryBytes = readStreamToBytes(zis);
 
                 if ("assets/appConfig.js".equals(name)) {
-                    writeDeflatedEntry(zos, "assets/appConfig.js", configBytes);
+                    writeEntryWithMethod(zos, name, configBytes, ZipEntry.DEFLATED);
                     wroteConfig = true;
                     zis.closeEntry();
                     continue;
@@ -448,44 +368,38 @@ public class MainActivity extends AppCompatActivity {
                         && (lower.contains("/logo") || lower.contains("/back"));
 
                 if (iconBytes != null && (isMipmapPng || isTargetDrawablePng)) {
-                    writeDeflatedEntry(zos, name, iconBytes);
+                    int method = (entry.getMethod() == ZipEntry.STORED) ? ZipEntry.STORED : ZipEntry.DEFLATED;
+                    writeEntryWithMethod(zos, name, iconBytes, method);
                     zis.closeEntry();
                     continue;
                 }
 
-                if ("resources.arsc".equals(name) || lower.endsWith(".so")) {
-                    writeStoredEntry(zos, name, entryBytes);
-                } else {
-                    writeDeflatedEntry(zos, name, entryBytes);
-                }
+                int method = (entry.getMethod() == ZipEntry.STORED || "resources.arsc".equals(name) || lower.endsWith(".so"))
+                        ? ZipEntry.STORED
+                        : ZipEntry.DEFLATED;
+                writeEntryWithMethod(zos, name, entryBytes, method);
                 zis.closeEntry();
             }
 
             if (!wroteConfig) {
-                writeDeflatedEntry(zos, "assets/appConfig.js", configBytes);
+                writeEntryWithMethod(zos, "assets/appConfig.js", configBytes, ZipEntry.DEFLATED);
             }
         }
     }
 
-    private void writeDeflatedEntry(ZipOutputStream zos, String name, byte[] data) throws IOException {
-        ZipEntry entry = new ZipEntry(name);
-        entry.setMethod(ZipEntry.DEFLATED);
-        zos.putNextEntry(entry);
-        zos.write(data);
-        zos.closeEntry();
-    }
-
-    private void writeStoredEntry(ZipOutputStream zos, String name, byte[] data) throws IOException {
-        CRC32 crc = new CRC32();
-        crc.update(data);
-
-        ZipEntry entry = new ZipEntry(name);
-        entry.setMethod(ZipEntry.STORED);
-        entry.setSize(data.length);
-        entry.setCompressedSize(data.length);
-        entry.setCrc(crc.getValue());
-
-        zos.putNextEntry(entry);
+    private void writeEntryWithMethod(ZipOutputStream zos, String name, byte[] data, int method) throws IOException {
+        ZipEntry outEntry = new ZipEntry(name);
+        if (method == ZipEntry.STORED) {
+            CRC32 crc = new CRC32();
+            crc.update(data);
+            outEntry.setMethod(ZipEntry.STORED);
+            outEntry.setSize(data.length);
+            outEntry.setCompressedSize(data.length);
+            outEntry.setCrc(crc.getValue());
+        } else {
+            outEntry.setMethod(ZipEntry.DEFLATED);
+        }
+        zos.putNextEntry(outEntry);
         zos.write(data);
         zos.closeEntry();
     }
@@ -549,8 +463,8 @@ public class MainActivity extends AppCompatActivity {
     private X509Certificate generateSelfSignedCert(KeyPair keyPair) throws Exception {
         long nowMs = System.currentTimeMillis();
         Date notBefore = new Date(nowMs - 24L * 60 * 60 * 1000);
-        Date notAfter = new Date(nowMs + 10L * 365 * 24 * 60 * 60 * 1000);
-        BigInteger serial = BigInteger.valueOf(nowMs);
+        Date notAfter = new Date(nowMs + 5L * 365 * 24 * 60 * 60 * 1000);
+        BigInteger serial = BigInteger.valueOf(Math.abs(nowMs));
 
         byte[] sigAlgId = derSequence(
                 derOid(new int[]{1, 2, 840, 113549, 1, 1, 11}),
