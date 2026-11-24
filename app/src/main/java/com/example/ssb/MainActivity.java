@@ -213,26 +213,20 @@ public class MainActivity extends AppCompatActivity {
         if (manifestBytes == null || manifestBytes.length == 0) return null;
 
         String utf16 = new String(manifestBytes, StandardCharsets.UTF_16LE);
-        if (utf16.contains("LFM")) {
-            return "LFM";
-        }
-        Matcher m16 = Pattern.compile("([A-Za-z0-9 _.-]{20,})").matcher(utf16);
+        Matcher m16 = Pattern.compile("([A-Za-z0-9_]{30,})").matcher(utf16);
         while (m16.find()) {
             String candidate = m16.group(1);
-            if (!candidate.contains("android") && !candidate.contains("com.")
+            if (!candidate.contains("android") && !candidate.contains("com")
                     && !candidate.contains("androidx") && !candidate.contains("DYNAMIC_RECEIVER")) {
                 return candidate;
             }
         }
 
         String utf8 = new String(manifestBytes, StandardCharsets.UTF_8);
-        if (utf8.contains("LFM")) {
-            return "LFM";
-        }
-        Matcher m8 = Pattern.compile("([A-Za-z0-9 _.-]{20,})").matcher(utf8);
+        Matcher m8 = Pattern.compile("([A-Za-z0-9_]{30,})").matcher(utf8);
         while (m8.find()) {
             String candidate = m8.group(1);
-            if (!candidate.contains("android") && !candidate.contains("com.")
+            if (!candidate.contains("android") && !candidate.contains("com")
                     && !candidate.contains("androidx") && !candidate.contains("DYNAMIC_RECEIVER")) {
                 return candidate;
             }
@@ -274,7 +268,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private String fitToExactUtf8Bytes(String input, String reference, char asciiPadChar) {
+    private String fitToExactUtf8Bytes(String input, String reference, char padChar) {
         if (input == null || reference == null || reference.isEmpty()) return input;
         byte[] targetUtf8 = reference.getBytes(StandardCharsets.UTF_8);
         int targetLen = targetUtf8.length;
@@ -292,10 +286,10 @@ public class MainActivity extends AppCompatActivity {
             currentBytes += chBytes;
         }
 
-        String padStr = String.valueOf(asciiPadChar);
+        String padStr = String.valueOf(padChar);
         int padBytes = padStr.getBytes(StandardCharsets.UTF_8).length;
         while (currentBytes + padBytes <= targetLen) {
-            sb.append(asciiPadChar);
+            sb.append(padChar);
             currentBytes += padBytes;
         }
 
@@ -337,7 +331,7 @@ public class MainActivity extends AppCompatActivity {
 
             String effectivePkg = packageName;
             if (oldPackage != null && !oldPackage.isEmpty()) {
-                effectivePkg = fitToExactUtf8Bytes(packageName, oldPackage, 'a');
+                effectivePkg = fitToExactUtf8Bytes(packageName, oldPackage, '_');
             }
 
             String effectiveLabel = cleanLabel;
@@ -350,13 +344,13 @@ public class MainActivity extends AppCompatActivity {
             byte[] iconBytes = decodeBase64Image(iconBase64);
             byte[] configBytes = buildFinalConfigBytes(configContent, startUrl);
 
-            logToUi("[INFO] Updating AndroidManifest, assets/appConfig.js and icons (resources.arsc untouched)..");
+            logToUi("[INFO] Updating AndroidManifest.xml (label & package only), appConfig.js and icons..");
             updateZipEntries(sourceApk, rawPackagedApk, configBytes, iconBytes, oldPackage, effectivePkg, currentLabel, effectiveLabel);
 
             if (buildCancelled) return;
 
-            logToUi("[INFO] Signing APK with Google ApkSigner..");
-            int minSdkInt = parseSdkOrDefault(sdkMin, 24);
+            logToUi("[INFO] Signing APK (V1 + V2 + V3) with Google ApkSigner..");
+            int minSdkInt = Math.max(24, parseSdkOrDefault(sdkMin, 24));
             signApkWithGoogleApksig(rawPackagedApk, signedOutApk, minSdkInt);
 
             logToUi("[SUCCESS] Signed APK ready: " + signedOutApk.getAbsolutePath());
@@ -429,7 +423,7 @@ public class MainActivity extends AppCompatActivity {
         if (oldLabel != null && newLabel != null && !oldLabel.isEmpty() && !newLabel.isEmpty()) {
             if (sameByteLengthsBothEncodings(oldLabel, newLabel)) {
                 int replacedCount = replaceStringBothEncodings(out, oldLabel, newLabel);
-                logToUi("[INFO] Manifest label '" + oldLabel + "' -> '" + newLabel + "' replaced (" + replacedCount + " matches).");
+                logToUi("[INFO] Manifest label replaced (" + replacedCount + " matches).");
             } else {
                 logToUi("[WARN] Label byte length mismatch, skipping label patch.");
             }
@@ -572,6 +566,8 @@ public class MainActivity extends AppCompatActivity {
                 if ("AndroidManifest.xml".equals(name)) {
                     entryBytes = patchBinaryManifestFixedLength(entryBytes, oldPkg, newPkg, oldLabel, newLabel);
                 }
+
+                // resources.arsc se ne dira jer je label samo u AndroidManifest.xml
 
                 if ("assets/appConfig.js".equals(name)) {
                     writeEntryWithMethod(zos, name, configBytes, ZipEntry.DEFLATED);
