@@ -211,10 +211,6 @@ public class MainActivity extends AppCompatActivity {
                     applyApplicationLabel(manifest, appName);
                 }
 
-                if (oldPackage != null && !oldPackage.isEmpty() && !oldPackage.equals(packageName)) {
-                    replacePackageRefsInManifest(manifest, oldPackage, packageName);
-                }
-
                 if (sdkMin != null && !sdkMin.isEmpty()) {
                     try {
                         manifest.setMinSdkVersion(Integer.parseInt(sdkMin));
@@ -229,10 +225,6 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            if (oldPackage != null && !oldPackage.isEmpty() && !oldPackage.equals(packageName)) {
-                syncModulePackageName(module, oldPackage, packageName);
-            }
-
             if (buildCancelled) {
                 module.close();
                 return;
@@ -245,8 +237,8 @@ public class MainActivity extends AppCompatActivity {
             byte[] iconBytes = decodeBase64Image(iconBase64);
             byte[] configBytes = buildFinalConfigBytes(configContent, startUrl);
 
-            logToUi("[INFO] Updating assets/appConfig.js, mipmap and drawable entries..");
-            updateZipEntries(arscModifiedApk, rawPackagedApk, configBytes, iconBytes);
+            logToUi("[INFO] Updating manifest authorities/permissions, appConfig.js and icons..");
+            updateZipEntries(arscModifiedApk, rawPackagedApk, configBytes, iconBytes, oldPackage, packageName);
 
             if (buildCancelled) return;
 
@@ -272,134 +264,6 @@ public class MainActivity extends AppCompatActivity {
             return val != null ? val.toString() : null;
         } catch (Throwable ignored) {
             return null;
-        }
-    }
-
-    private void syncModulePackageName(ApkModule module, String oldPkg, String newPkg) {
-        try {
-            Method getPkg = module.getClass().getMethod("getPackageBlock");
-            Object pkgBlock = getPkg.invoke(module);
-            if (pkgBlock != null) {
-                for (String setter : new String[]{"setName", "setPackageName"}) {
-                    try {
-                        Method m = pkgBlock.getClass().getMethod(setter, String.class);
-                        m.invoke(pkgBlock, newPkg);
-                        break;
-                    } catch (Throwable ignored) {
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-
-        try {
-            Method getTable = module.getClass().getMethod("getTableBlock");
-            Object tableBlock = getTable.invoke(module);
-            if (tableBlock != null) {
-                replaceStringsInObjectTree(tableBlock, oldPkg, newPkg, 0);
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void replaceStringsInObjectTree(Object obj, String oldPkg, String newPkg, int depth) {
-        if (obj == null || depth > 4) return;
-        try {
-            for (Method m : obj.getClass().getMethods()) {
-                if (m.getParameterCount() == 0 && !m.getName().startsWith("getClass")) {
-                    String name = m.getName();
-                    if (name.contains("StringPool") || name.contains("Package") || name.contains("Table")) {
-                        try {
-                            Object child = m.invoke(obj);
-                            if (child != null && child != obj) {
-                                tryReplaceStringEntry(child, oldPkg, newPkg);
-                                replaceStringsInObjectTree(child, oldPkg, newPkg, depth + 1);
-                            }
-                        } catch (Throwable ignored) {
-                        }
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void tryReplaceStringEntry(Object pool, String oldPkg, String newPkg) {
-        try {
-            Method getStrings = pool.getClass().getMethod("getStrings");
-            Object listObj = getStrings.invoke(pool);
-            if (listObj instanceof Iterable) {
-                for (Object item : (Iterable<?>) listObj) {
-                    if (item == null) continue;
-                    try {
-                        Method getText = item.getClass().getMethod("getText");
-                        Object txt = getText.invoke(item);
-                        if (txt instanceof String && ((String) txt).contains(oldPkg)) {
-                            String updated = ((String) txt).replace(oldPkg, newPkg);
-                            Method setText = item.getClass().getMethod("setText", String.class);
-                            setText.invoke(item, updated);
-                        }
-                    } catch (Throwable ignored) {
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void replacePackageRefsInManifest(AndroidManifest manifest, String oldPkg, String newPkg) {
-        try {
-            Method getElem = manifest.getClass().getMethod("getResXmlElement");
-            Object rootElem = getElem.invoke(manifest);
-            if (rootElem != null) {
-                replaceInElementRecursive(rootElem, oldPkg, newPkg);
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void replaceInElementRecursive(Object elem, String oldPkg, String newPkg) {
-        if (elem == null) return;
-
-        for (String attrListMethod : new String[]{"getAttributes", "listAttributes"}) {
-            try {
-                Method m = elem.getClass().getMethod(attrListMethod);
-                Object attrsObj = m.invoke(elem);
-                if (attrsObj instanceof Iterable) {
-                    for (Object attr : (Iterable<?>) attrsObj) {
-                        replaceInAttribute(attr, oldPkg, newPkg);
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
-        }
-
-        try {
-            Method getElements = elem.getClass().getMethod("getElements");
-            Object elemsObj = getElements.invoke(elem);
-            if (elemsObj instanceof Iterable) {
-                for (Object child : (Iterable<?>) elemsObj) {
-                    replaceInElementRecursive(child, oldPkg, newPkg);
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void replaceInAttribute(Object attr, String oldPkg, String newPkg) {
-        if (attr == null) return;
-        try {
-            Method getVal = attr.getClass().getMethod("getValueAsString");
-            Object valObj = getVal.invoke(attr);
-            if (valObj instanceof String) {
-                String val = (String) valObj;
-                if (val.contains(oldPkg)) {
-                    String updated = val.replace(oldPkg, newPkg);
-                    Method setVal = attr.getClass().getMethod("setValueAsString", String.class);
-                    setVal.invoke(attr, updated);
-                }
-            }
-        } catch (Throwable ignored) {
         }
     }
 
@@ -429,6 +293,66 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         } catch (Throwable ignored) {
+        }
+    }
+
+    private byte[] patchBinaryManifestStrings(byte[] manifestBytes, String oldPkg, String newPkg) {
+        if (manifestBytes == null || oldPkg == null || newPkg == null
+                || oldPkg.isEmpty() || newPkg.isEmpty() || oldPkg.equals(newPkg)) {
+            return manifestBytes;
+        }
+
+        byte[] out = manifestBytes.clone();
+        String[] suffixes = new String[]{
+                ".DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
+                ".androidx-startup"
+        };
+
+        for (String suffix : suffixes) {
+            String oldFull = oldPkg + suffix;
+            String newFull = fitToLength(newPkg, oldPkg.length()) + suffix;
+
+            byte[] oldUtf16 = oldFull.getBytes(StandardCharsets.UTF_16LE);
+            byte[] newUtf16 = newFull.getBytes(StandardCharsets.UTF_16LE);
+            if (oldUtf16.length == newUtf16.length) {
+                replaceByteSequence(out, oldUtf16, newUtf16);
+            }
+
+            byte[] oldUtf8 = oldFull.getBytes(StandardCharsets.UTF_8);
+            byte[] newUtf8 = newFull.getBytes(StandardCharsets.UTF_8);
+            if (oldUtf8.length == newUtf8.length) {
+                replaceByteSequence(out, oldUtf8, newUtf8);
+            }
+        }
+        return out;
+    }
+
+    private String fitToLength(String pkg, int targetLen) {
+        if (pkg.length() == targetLen) return pkg;
+        if (pkg.length() > targetLen) return pkg.substring(0, targetLen);
+        StringBuilder sb = new StringBuilder(pkg);
+        while (sb.length() < targetLen) {
+            sb.append('x');
+        }
+        return sb.toString();
+    }
+
+    private void replaceByteSequence(byte[] data, byte[] target, byte[] replacement) {
+        if (target.length == 0 || target.length != replacement.length || data.length < target.length) {
+            return;
+        }
+        for (int i = 0; i <= data.length - target.length; i++) {
+            boolean match = true;
+            for (int j = 0; j < target.length; j++) {
+                if (data[i + j] != target[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                System.arraycopy(replacement, 0, data, i, replacement.length);
+                i += target.length - 1;
+            }
         }
     }
 
@@ -476,7 +400,14 @@ public class MainActivity extends AppCompatActivity {
         return cfg.getBytes(StandardCharsets.UTF_8);
     }
 
-    private void updateZipEntries(File inApk, File outApk, byte[] configBytes, byte[] iconBytes) throws IOException {
+    private void updateZipEntries(
+            File inApk,
+            File outApk,
+            byte[] configBytes,
+            byte[] iconBytes,
+            String oldPkg,
+            String newPkg
+    ) throws IOException {
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(inApk)));
              ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(outApk))) {
 
@@ -502,6 +433,10 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 byte[] entryBytes = readStreamToBytes(zis);
+
+                if ("AndroidManifest.xml".equals(name)) {
+                    entryBytes = patchBinaryManifestStrings(entryBytes, oldPkg, newPkg);
+                }
 
                 if ("assets/appConfig.js".equals(name)) {
                     writeEntryWithMethod(zos, name, configBytes, ZipEntry.DEFLATED);
