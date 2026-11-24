@@ -23,8 +23,6 @@ import androidx.core.content.FileProvider;
 import com.android.apksig.ApkSigner;
 import com.reandroid.apk.ApkModule;
 import com.reandroid.app.AndroidManifest;
-import com.reandroid.arsc.chunk.xml.ResXmlAttribute;
-import com.reandroid.arsc.chunk.xml.ResXmlElement;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedReader;
@@ -36,6 +34,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.lang.reflect.Method;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
@@ -257,14 +256,35 @@ public class MainActivity extends AppCompatActivity {
 
     private void applyApplicationLabel(AndroidManifest manifest, String appName) {
         try {
-            ResXmlElement appElem = manifest.getApplication();
-            if (appElem != null) {
-                for (ResXmlAttribute attr : appElem.listAttributes()) {
-                    if (attr != null && (attr.getNameId() == AndroidManifest.ID_label
-                            || "label".equals(attr.getName()))) {
-                        attr.setValueAsString(appName);
+            Object appElem = null;
+            for (String methodName : new String[]{"getApplicationElement", "getApplication"}) {
+                try {
+                    Method m = manifest.getClass().getMethod(methodName);
+                    appElem = m.invoke(manifest);
+                    if (appElem != null) break;
+                } catch (Throwable ignored) {
+                }
+            }
+            if (appElem == null) return;
+
+            for (Method m : appElem.getClass().getMethods()) {
+                if ("setValueAsString".equals(m.getName()) && m.getParameterCount() == 1
+                        && m.getParameterTypes()[0] == String.class) {
+                    // Direktno ne zovemo na elementu, već tražimo atribut label
+                }
+            }
+
+            Method getAttr = null;
+            for (String mName : new String[]{"getAndroidAttribute", "searchAttributeByName"}) {
+                try {
+                    getAttr = appElem.getClass().getMethod(mName, String.class);
+                    Object attr = getAttr.invoke(appElem, "label");
+                    if (attr != null) {
+                        Method setVal = attr.getClass().getMethod("setValueAsString", String.class);
+                        setVal.invoke(attr, appName);
                         return;
                     }
+                } catch (Throwable ignored) {
                 }
             }
         } catch (Throwable ignored) {
