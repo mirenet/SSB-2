@@ -52,6 +52,7 @@ import java.util.Locale;
 import java.util.TimeZone;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -267,17 +268,9 @@ public class MainActivity extends AppCompatActivity {
             }
             if (appElem == null) return;
 
-            for (Method m : appElem.getClass().getMethods()) {
-                if ("setValueAsString".equals(m.getName()) && m.getParameterCount() == 1
-                        && m.getParameterTypes()[0] == String.class) {
-                    // Direktno ne zovemo na elementu, već tražimo atribut label
-                }
-            }
-
-            Method getAttr = null;
             for (String mName : new String[]{"getAndroidAttribute", "searchAttributeByName"}) {
                 try {
-                    getAttr = appElem.getClass().getMethod(mName, String.class);
+                    Method getAttr = appElem.getClass().getMethod(mName, String.class);
                     Object attr = getAttr.invoke(appElem, "label");
                     if (attr != null) {
                         Method setVal = attr.getClass().getMethod("setValueAsString", String.class);
@@ -339,7 +332,6 @@ public class MainActivity extends AppCompatActivity {
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(inApk)));
              ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(outApk))) {
 
-            byte[] buffer = new byte[8192];
             boolean wroteConfig = false;
             ZipEntry entry;
 
@@ -354,10 +346,17 @@ public class MainActivity extends AppCompatActivity {
                     continue;
                 }
 
-                if ("assets/appConfig.js".equals(name)) {
-                    zos.putNextEntry(new ZipEntry("assets/appConfig.js"));
-                    zos.write(configBytes);
+                if (entry.isDirectory()) {
+                    zos.putNextEntry(new ZipEntry(name));
                     zos.closeEntry();
+                    zis.closeEntry();
+                    continue;
+                }
+
+                byte[] entryBytes = readStreamToBytes(zis);
+
+                if ("assets/appConfig.js".equals(name)) {
+                    writeDeflatedEntry(zos, "assets/appConfig.js", configBytes);
                     wroteConfig = true;
                     zis.closeEntry();
                     continue;
@@ -369,30 +368,46 @@ public class MainActivity extends AppCompatActivity {
                         && (lower.contains("/logo") || lower.contains("/back"));
 
                 if (iconBytes != null && (isMipmapPng || isTargetDrawablePng)) {
-                    zos.putNextEntry(new ZipEntry(name));
-                    zos.write(iconBytes);
-                    zos.closeEntry();
+                    writeDeflatedEntry(zos, name, iconBytes);
                     zis.closeEntry();
                     continue;
                 }
 
-                zos.putNextEntry(new ZipEntry(name));
-                if (!entry.isDirectory()) {
-                    int len;
-                    while ((len = zis.read(buffer)) != -1) {
-                        zos.write(buffer, 0, len);
-                    }
+                if ("resources.arsc".equals(name) || lower.endsWith(".so")) {
+                    writeStoredEntry(zos, name, entryBytes);
+                } else {
+                    writeDeflatedEntry(zos, name, entryBytes);
                 }
-                zos.closeEntry();
                 zis.closeEntry();
             }
 
             if (!wroteConfig) {
-                zos.putNextEntry(new ZipEntry("assets/appConfig.js"));
-                zos.write(configBytes);
-                zos.closeEntry();
+                writeDeflatedEntry(zos, "assets/appConfig.js", configBytes);
             }
         }
+    }
+
+    private void writeDeflatedEntry(ZipOutputStream zos, String name, byte[] data) throws IOException {
+        ZipEntry entry = new ZipEntry(name);
+        entry.setMethod(ZipEntry.DEFLATED);
+        zos.putNextEntry(entry);
+        zos.write(data);
+        zos.closeEntry();
+    }
+
+    private void writeStoredEntry(ZipOutputStream zos, String name, byte[] data) throws IOException {
+        CRC32 crc = new CRC32();
+        crc.update(data);
+
+        ZipEntry entry = new ZipEntry(name);
+        entry.setMethod(ZipEntry.STORED);
+        entry.setSize(data.length);
+        entry.setCompressedSize(data.length);
+        entry.setCrc(crc.getValue());
+
+        zos.putNextEntry(entry);
+        zos.write(data);
+        zos.closeEntry();
     }
 
     private void signApkWithGoogleApksig(File inputApk, File outputApk) throws Exception {
@@ -586,14 +601,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private byte[] readStreamToBytes(InputStream in) throws IOException {
-        try (InputStream stream = in; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            byte[] buf = new byte[8192];
-            int len;
-            while ((len = stream.read(buf)) != -1) {
-                out.write(buf, 0, len);
-            }
-            return out.toByteArray();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int len;
+        while ((len = in.read(buf)) != -1) {
+            out.write(buf, 0, len);
         }
+        return out.toByteArray();
     }
 
     private File getOutputApkFile() {
