@@ -536,7 +536,7 @@
 
         <div class="logs-section">
             <div class="section-title">Build Logs:</div>
-            <div class="logs-box" id="logsBox">Local APK builder ready (ARSCLib + ApkSigner)..<br>Source: assets/skeleton.apk..<br>Click "Create" to build and sign APK..</div>
+            <div class="logs-box" id="logsBox">Local APK builder ready.. &lt;br&gt;Source: assets/skeleton.apk..&lt;br&gt;Click "Create" to build and sign APK..</div>
         </div>
 
         <button type="button" class="btn-install" id="installBtn" disabled onclick="installApp()">Install APK</button>
@@ -569,8 +569,37 @@ background: false
         let selectedApkName = "assets/skeleton.apk";
         let importedApkBase64 = "";
         let selectedIconBase64 = "";
+        let maxPackageLength = null;
+
+        function applyPackageLengthLimit(length) {
+            if (typeof length === "number" && length > 0) {
+                maxPackageLength = length;
+            }
+            const pkgInput = document.getElementById('appPackage');
+            if (!pkgInput || typeof maxPackageLength !== "number") return;
+            pkgInput.maxLength = maxPackageLength;
+            if (pkgInput.value.length > maxPackageLength) {
+                pkgInput.value = pkgInput.value.slice(0, maxPackageLength);
+            }
+        }
+
+        function enforcePackageLength() {
+            const pkgInput = document.getElementById('appPackage');
+            if (!pkgInput || typeof maxPackageLength !== "number") return;
+            if (pkgInput.value.length > maxPackageLength) {
+                pkgInput.value = pkgInput.value.slice(0, maxPackageLength);
+            }
+        }
 
         window.addEventListener('DOMContentLoaded', () => {
+            const pkgInput = document.getElementById('appPackage');
+            if (pkgInput) {
+                pkgInput.addEventListener('input', enforcePackageLength);
+                pkgInput.addEventListener('paste', () => {
+                    setTimeout(enforcePackageLength, 0);
+                });
+            }
+
             const savedConfig = localStorage.getItem('appConfigText');
             if (savedConfig && savedConfig.trim().length > 0) {
                 document.getElementById('configContent').value = savedConfig;
@@ -590,11 +619,15 @@ background: false
             const nameInput = document.getElementById('appName');
             const pkgInput = document.getElementById('appPackage');
 
+            if (typeof packageName === "string" && packageName.trim().length > 0) {
+                const cleanPkg = packageName.trim();
+                applyPackageLengthLimit(cleanPkg.length);
+                if (pkgInput.value.length > maxPackageLength) {
+                    pkgInput.value = pkgInput.value.slice(0, maxPackageLength);
+                }
+            }
             if (typeof appName === "string" && appName.length > 0) {
                 nameInput.value = appName;
-            }
-            if (typeof packageName === "string" && packageName.length > 0) {
-                pkgInput.value = packageName;
             }
         }
 
@@ -710,6 +743,7 @@ background: false
 
         function startBuild() {
             syncUrlIntoConfigTextarea();
+            enforcePackageLength();
 
             const statusText = document.getElementById('statusText');
             const spinner = document.getElementById('spinner');
@@ -717,7 +751,9 @@ background: false
             const installBtn = document.getElementById('installBtn');
 
             const appName = document.getElementById('appName').value.trim();
-            const appPackage = document.getElementById('appPackage').value.trim();
+            const appPackage = typeof maxPackageLength === "number"
+                ? document.getElementById('appPackage').value.trim().slice(0, maxPackageLength)
+                : document.getElementById('appPackage').value.trim();
             const appUrl = document.getElementById('appUrl').value.trim();
             const configContent = document.getElementById('configContent').value;
             const sdkMin = document.getElementById('sdkMin').value.trim();
@@ -761,7 +797,7 @@ background: false
             statusText.textContent = "Status: OFF";
             statusText.style.color = "#D94242";
             spinner.style.display = "none";
-            logsBox.innerHTML = "Local APK builder ready (ARSCLib + ApkSigner)..<br>Source: assets/skeleton.apk..<br>Click \"Create\" to build and sign APK..";
+            logsBox.innerHTML = "Local APK builder ready.. &lt;br&gt;Source: assets/skeleton.apk..&lt;br&gt;Click \"Create\" to build and sign APK..";
 
             installBtn.classList.remove('active');
             installBtn.disabled = true;
