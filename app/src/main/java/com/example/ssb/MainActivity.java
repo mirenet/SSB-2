@@ -257,16 +257,14 @@ public class MainActivity extends AppCompatActivity {
 
     private void applyApplicationLabel(AndroidManifest manifest, String appName) {
         try {
-            ResXmlElement appElem = manifest.getApplicationElement();
+            ResXmlElement appElem = manifest.getApplication();
             if (appElem != null) {
-                ResXmlAttribute labelAttr = appElem.getAndroidAttribute(AndroidManifest.NAME_label);
-                if (labelAttr != null) {
-                    labelAttr.setValueAsString(appName);
-                } else {
-                    appElem.getOrCreateAndroidAttribute(
-                            AndroidManifest.NAME_label,
-                            AndroidManifest.ID_label
-                    ).setValueAsString(appName);
+                for (ResXmlAttribute attr : appElem.listAttributes()) {
+                    if (attr != null && (attr.getNameId() == AndroidManifest.ID_label
+                            || "label".equals(attr.getName()))) {
+                        attr.setValueAsString(appName);
+                        return;
+                    }
                 }
             }
         } catch (Throwable ignored) {
