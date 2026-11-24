@@ -201,12 +201,18 @@ public class MainActivity extends AppCompatActivity {
             logToUi("[INFO] Loading APK with ARSCLib: " + sourceApk.getName());
             ApkModule module = ApkModule.loadApkFile(sourceApk);
 
+            String oldPackage = null;
             if (module.hasAndroidManifest()) {
                 AndroidManifest manifest = module.getAndroidManifest();
+                oldPackage = readCurrentPackageName(manifest);
                 manifest.setPackageName(packageName);
 
                 if (appName != null && !appName.isEmpty()) {
                     applyApplicationLabel(manifest, appName);
+                }
+
+                if (oldPackage != null && !oldPackage.isEmpty() && !oldPackage.equals(packageName)) {
+                    replaceConflictingPackageRefs(manifest, oldPackage, packageName);
                 }
 
                 if (sdkMin != null && !sdkMin.isEmpty()) {
@@ -221,6 +227,10 @@ public class MainActivity extends AppCompatActivity {
                     } catch (Exception ignored) {
                     }
                 }
+            }
+
+            if (oldPackage != null && !oldPackage.isEmpty() && !oldPackage.equals(packageName)) {
+                syncModulePackageName(module, oldPackage, packageName);
             }
 
             if (buildCancelled) {
@@ -252,6 +262,116 @@ public class MainActivity extends AppCompatActivity {
             }
             e.printStackTrace();
             setErrorUi(e.getMessage() != null ? e.getMessage() : "Local APK build/sign failed.");
+        }
+    }
+
+    private String readCurrentPackageName(AndroidManifest manifest) {
+        try {
+            Method m = manifest.getClass().getMethod("getPackageName");
+            Object val = m.invoke(manifest);
+            return val != null ? val.toString() : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private void syncModulePackageName(ApkModule module, String oldPkg, String newPkg) {
+        try {
+            Method getPkg = module.getClass().getMethod("getPackageBlock");
+            Object pkgBlock = getPkg.invoke(module);
+            if (pkgBlock != null) {
+                for (String setter : new String[]{"setName", "setPackageName"}) {
+                    try {
+                        Method m = pkgBlock.getClass().getMethod(setter, String.class);
+                        m.invoke(pkgBlock, newPkg);
+                        break;
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void replaceConflictingPackageRefs(AndroidManifest manifest, String oldPkg, String newPkg) {
+        try {
+            Method getElem = manifest.getClass().getMethod("getResXmlElement");
+            Object rootElem = getElem.invoke(manifest);
+            if (rootElem != null) {
+                replaceInElementRecursive(rootElem, oldPkg, newPkg);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void replaceInElementRecursive(Object elem, String oldPkg, String newPkg) {
+        if (elem == null) return;
+
+        String tagName = "";
+        try {
+            Method getName = elem.getClass().getMethod("getName");
+            Object n = getName.invoke(elem);
+            if (n != null) tagName = n.toString();
+        } catch (Throwable ignored) {
+        }
+
+        boolean shouldCheckAttrs = "permission".equals(tagName)
+                || "uses-permission".equals(tagName)
+                || "provider".equals(tagName);
+
+        if (shouldCheckAttrs) {
+            for (String attrListMethod : new String[]{"getAttributes", "listAttributes"}) {
+                try {
+                    Method m = elem.getClass().getMethod(attrListMethod);
+                    Object attrsObj = m.invoke(elem);
+                    if (attrsObj instanceof Iterable) {
+                        for (Object attr : (Iterable<?>) attrsObj) {
+                            replaceInAttribute(attr, oldPkg, newPkg);
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+
+        try {
+            Method getElements = elem.getClass().getMethod("getElements");
+            Object elemsObj = getElements.invoke(elem);
+            if (elemsObj instanceof Iterable) {
+                for (Object child : (Iterable<?>) elemsObj) {
+                    replaceInElementRecursive(child, oldPkg, newPkg);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void replaceInAttribute(Object attr, String oldPkg, String newPkg) {
+        if (attr == null) return;
+        try {
+            String attrName = "";
+            try {
+                Method getName = attr.getClass().getMethod("getName");
+                Object n = getName.invoke(attr);
+                if (n != null) attrName = n.toString();
+            } catch (Throwable ignored) {
+            }
+
+            if (!"name".equals(attrName) && !"authorities".equals(attrName)) {
+                return;
+            }
+
+            Method getVal = attr.getClass().getMethod("getValueAsString");
+            Object valObj = getVal.invoke(attr);
+            if (valObj instanceof String) {
+                String val = (String) valObj;
+                if (val.startsWith(oldPkg + ".") || val.equals(oldPkg)) {
+                    String updated = val.replace(oldPkg, newPkg);
+                    Method setVal = attr.getClass().getMethod("setValueAsString", String.class);
+                    setVal.invoke(attr, updated);
+                }
+            }
+        } catch (Throwable ignored) {
         }
     }
 
