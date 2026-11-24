@@ -30,9 +30,11 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
@@ -361,7 +363,7 @@ public class MainActivity extends AppCompatActivity {
             int minSdkInt = Math.max(24, parseSdkOrDefault(sdkMin, 24));
             signApkWithGoogleApksig(rawPackagedApk, signedOutApk, minSdkInt);
 
-            logToUi("[SUCCESS] Signed APK ready: " + signedOutApk.getAbsolutePath());
+            logToUi("[SUCCESS] Signed APK ready (" + signedOutApk.length() + " bytes): " + signedOutApk.getAbsolutePath());
             setReadyUi();
         } catch (Exception e) {
             if (buildCancelled) {
@@ -538,6 +540,26 @@ public class MainActivity extends AppCompatActivity {
         return cfg.getBytes(StandardCharsets.UTF_8);
     }
 
+    private static class CountingOutputStream extends FilterOutputStream {
+        long bytesWritten = 0;
+
+        CountingOutputStream(OutputStream out) {
+            super(out);
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            out.write(b);
+            bytesWritten++;
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            out.write(b, off, len);
+            bytesWritten += len;
+        }
+    }
+
     private void updateZipEntries(
             File inApk,
             File outApk,
@@ -548,8 +570,9 @@ public class MainActivity extends AppCompatActivity {
             String oldLabel,
             String newLabel
     ) throws IOException {
+        CountingOutputStream cos = new CountingOutputStream(new FileOutputStream(outApk));
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(inApk)));
-             ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(outApk))) {
+             ZipOutputStream zos = new ZipOutputStream(cos)) {
 
             boolean wroteConfig = false;
             ZipEntry entry;
@@ -579,7 +602,7 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 if ("assets/appConfig.js".equals(name)) {
-                    writeEntryWithMethod(zos, name, configBytes, ZipEntry.DEFLATED);
+                    writeEntryWithMethod(zos, cos, name, configBytes, ZipEntry.DEFLATED);
                     wroteConfig = true;
                     zis.closeEntry();
                     continue;
@@ -592,7 +615,7 @@ public class MainActivity extends AppCompatActivity {
 
                 if (iconBytes != null && (isMipmapPng || isTargetDrawablePng)) {
                     int method = (entry.getMethod() == ZipEntry.STORED) ? ZipEntry.STORED : ZipEntry.DEFLATED;
-                    writeEntryWithMethod(zos, name, iconBytes, method);
+                    writeEntryWithMethod(zos, cos, name, iconBytes, method);
                     zis.closeEntry();
                     continue;
                 }
@@ -600,17 +623,24 @@ public class MainActivity extends AppCompatActivity {
                 int method = (entry.getMethod() == ZipEntry.STORED || "resources.arsc".equals(name) || lower.endsWith(".so"))
                         ? ZipEntry.STORED
                         : ZipEntry.DEFLATED;
-                writeEntryWithMethod(zos, name, entryBytes, method);
+                writeEntryWithMethod(zos, cos, name, entryBytes, method);
                 zis.closeEntry();
             }
 
             if (!wroteConfig) {
-                writeEntryWithMethod(zos, "assets/appConfig.js", configBytes, ZipEntry.DEFLATED);
+                writeEntryWithMethod(zos, cos, "assets/appConfig.js", configBytes, ZipEntry.DEFLATED);
             }
         }
     }
 
-    private void writeEntryWithMethod(ZipOutputStream zos, String name, byte[] data, int method) throws IOException {
+    private void writeEntryWithMethod(
+            ZipOutputStream zos,
+            CountingOutputStream cos,
+            String name,
+            byte[] data,
+            int method
+    ) throws IOException {
+        zos.flush();
         ZipEntry outEntry = new ZipEntry(name);
         if (method == ZipEntry.STORED) {
             CRC32 crc = new CRC32();
@@ -619,6 +649,14 @@ public class MainActivity extends AppCompatActivity {
             outEntry.setSize(data.length);
             outEntry.setCompressedSize(data.length);
             outEntry.setCrc(crc.getValue());
+
+            long headerSize = 30L + name.getBytes(StandardCharsets.UTF_8).length;
+            long currentOffset = cos.bytesWritten + headerSize;
+            int remainder = (int) (currentOffset % 4L);
+            if (remainder != 0) {
+                int padLen = 4 - remainder;
+                outEntry.setExtra(new byte[padLen]);
+            }
         } else {
             outEntry.setMethod(ZipEntry.DEFLATED);
         }
