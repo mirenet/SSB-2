@@ -211,14 +211,33 @@ public class MainActivity extends AppCompatActivity {
 
     private String detectCurrentLabel(byte[] manifestBytes) {
         if (manifestBytes == null || manifestBytes.length == 0) return null;
+
         String utf16 = new String(manifestBytes, StandardCharsets.UTF_16LE);
         if (utf16.contains("LFM")) {
             return "LFM";
         }
+        Matcher m16 = Pattern.compile("([A-Za-z0-9 _.-]{20,})").matcher(utf16);
+        while (m16.find()) {
+            String candidate = m16.group(1);
+            if (!candidate.contains("android") && !candidate.contains("com.")
+                    && !candidate.contains("androidx") && !candidate.contains("DYNAMIC_RECEIVER")) {
+                return candidate;
+            }
+        }
+
         String utf8 = new String(manifestBytes, StandardCharsets.UTF_8);
         if (utf8.contains("LFM")) {
             return "LFM";
         }
+        Matcher m8 = Pattern.compile("([A-Za-z0-9 _.-]{20,})").matcher(utf8);
+        while (m8.find()) {
+            String candidate = m8.group(1);
+            if (!candidate.contains("android") && !candidate.contains("com.")
+                    && !candidate.contains("androidx") && !candidate.contains("DYNAMIC_RECEIVER")) {
+                return candidate;
+            }
+        }
+
         return null;
     }
 
@@ -255,10 +274,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /**
-     * Usklađuje tekst na tačan broj UTF-8 bajtova kao originalni string,
-     * koristeći jednobajtne ASCII karaktere ('a' za package, ' ' za label) da nikad ne pomeri bajtove.
-     */
     private String fitToExactUtf8Bytes(String input, String reference, char asciiPadChar) {
         if (input == null || reference == null || reference.isEmpty()) return input;
         byte[] targetUtf8 = reference.getBytes(StandardCharsets.UTF_8);
@@ -277,7 +292,6 @@ public class MainActivity extends AppCompatActivity {
             currentBytes += chBytes;
         }
 
-        // asciiPadChar je uvek 1 bajt u UTF-8 i 2 bajta u UTF-16LE
         String padStr = String.valueOf(asciiPadChar);
         int padBytes = padStr.getBytes(StandardCharsets.UTF_8).length;
         while (currentBytes + padBytes <= targetLen) {
