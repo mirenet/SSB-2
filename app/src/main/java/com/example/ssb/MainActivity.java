@@ -179,16 +179,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private String extractPackageNameFromApk(File customApkFile) throws IOException {
-        byte[] manifestBytes;
-        if (customApkFile != null && customApkFile.exists()) {
-            try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(customApkFile)))) {
-                manifestBytes = readManifestEntry(zis);
-            }
-        } else {
-            try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(getAssets().open(SKELETON_ASSET_NAME)))) {
-                manifestBytes = readManifestEntry(zis);
-            }
-        }
+        byte[] manifestBytes = readManifestBytesFromApk(customApkFile);
         if (manifestBytes == null || manifestBytes.length == 0) return null;
 
         String[] candidates = new String[]{
@@ -210,6 +201,31 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         return null;
+    }
+
+    private String detectCurrentLabel(byte[] manifestBytes) {
+        if (manifestBytes == null || manifestBytes.length == 0) return null;
+        String utf16 = new String(manifestBytes, StandardCharsets.UTF_16LE);
+        if (utf16.contains("LFM")) {
+            return "LFM";
+        }
+        String utf8 = new String(manifestBytes, StandardCharsets.UTF_8);
+        if (utf8.contains("LFM")) {
+            return "LFM";
+        }
+        return null;
+    }
+
+    private byte[] readManifestBytesFromApk(File customApkFile) throws IOException {
+        if (customApkFile != null && customApkFile.exists()) {
+            try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(customApkFile)))) {
+                return readManifestEntry(zis);
+            }
+        } else {
+            try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(getAssets().open(SKELETON_ASSET_NAME)))) {
+                return readManifestEntry(zis);
+            }
+        }
     }
 
     private byte[] readManifestEntry(ZipInputStream zis) throws IOException {
@@ -261,14 +277,24 @@ public class MainActivity extends AppCompatActivity {
             File signedOutApk = getOutputApkFile();
 
             String oldPackage = extractPackageNameFromApk(sourceApk);
+            byte[] originalManifest = readManifestBytesFromApk(sourceApk);
+            String currentLabel = detectCurrentLabel(originalManifest);
+
+            if (appName != null && !appName.isEmpty() && currentLabel != null) {
+                if (appName.length() != currentLabel.length()) {
+                    logToUi("[WARN] Label '" + currentLabel + "' has " + currentLabel.length()
+                            + " chars, but entered name '" + appName + "' has " + appName.length()
+                            + " chars — binary string pool cannot change byte length in-place.");
+                }
+            }
 
             if (buildCancelled) return;
 
             byte[] iconBytes = decodeBase64Image(iconBase64);
             byte[] configBytes = buildFinalConfigBytes(configContent, startUrl);
 
-            logToUi("[INFO] Updating AndroidManifest, assets/appConfig.js, mipmap and drawable entries..");
-            updateZipEntries(sourceApk, rawPackagedApk, configBytes, iconBytes, oldPackage, packageName);
+            logToUi("[INFO] Updating AndroidManifest, resources.arsc, assets/appConfig.js and icons..");
+            updateZipEntries(sourceApk, rawPackagedApk, configBytes, iconBytes, oldPackage, packageName, currentLabel, appName);
 
             if (buildCancelled) return;
 
@@ -283,33 +309,63 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
             e.printStackTrace();
-            setErrorUi(e.getMessage() != null ? e.getMessage() : "Local APK build/sign failed.");
+            String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            setErrorUi(msg);
         }
     }
 
-    private byte[] patchBinaryManifestFixedLength(byte[] manifestBytes, String oldPkg, String newPkg) {
-        if (manifestBytes == null || oldPkg == null || newPkg == null
-                || oldPkg.isEmpty() || newPkg.isEmpty() || oldPkg.equals(newPkg)) {
-            return manifestBytes;
-        }
-
+    private byte[] patchBinaryManifestFixedLength(
+            byte[] manifestBytes,
+            String oldPkg,
+            String newPkg,
+            String oldLabel,
+            String newLabel
+    ) {
+        if (manifestBytes == null) return null;
         byte[] out = manifestBytes.clone();
-        String paddedNewPkg = padPackageToExactLength(newPkg, oldPkg.length());
 
-        // Zameni package atribut i prefiks na dozvoli/authorities, ali zadrzi stvarne klase MainActivity i MediaService
-        replaceStringBothEncodings(out, oldPkg, paddedNewPkg);
+        if (oldPkg != null && newPkg != null && !oldPkg.isEmpty() && !newPkg.isEmpty() && !oldPkg.equals(newPkg)) {
+            String paddedNewPkg = padPackageToExactLength(newPkg, oldPkg.length());
+            replaceStringBothEncodings(out, oldPkg, paddedNewPkg);
 
-        String[] suffixes = new String[]{
-                ".DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
-                ".androidx-startup"
-        };
-        for (String suffix : suffixes) {
-            replaceStringBothEncodings(out, oldPkg + suffix, paddedNewPkg + suffix);
+            String[] suffixes = new String[]{
+                    ".DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
+                    ".androidx-startup"
+            };
+            for (String suffix : suffixes) {
+                replaceStringBothEncodings(out, oldPkg + suffix, paddedNewPkg + suffix);
+            }
+
+            replaceStringBothEncodings(out, paddedNewPkg + ".MainActivity", oldPkg + ".MainActivity");
+            replaceStringBothEncodings(out, paddedNewPkg + ".MediaService", oldPkg + ".MediaService");
         }
 
-        replaceStringBothEncodings(out, paddedNewPkg + ".MainActivity", oldPkg + ".MainActivity");
-        replaceStringBothEncodings(out, paddedNewPkg + ".MediaService", oldPkg + ".MediaService");
+        if (oldLabel != null && newLabel != null && !oldLabel.isEmpty() && !newLabel.isEmpty()) {
+            if (oldLabel.length() == newLabel.length()) {
+                int replacedCount = replaceStringBothEncodings(out, oldLabel, newLabel);
+                logToUi("[INFO] Manifest label '" + oldLabel + "' -> '" + newLabel + "' replaced (" + replacedCount + " matches).");
+            } else {
+                logToUi("[WARN] Label length mismatch: '" + oldLabel + "' (" + oldLabel.length()
+                        + ") vs '" + newLabel + "' (" + newLabel.length() + ").");
+            }
+        }
 
+        return out;
+    }
+
+    private byte[] patchBinaryStringPoolFixedLength(byte[] rawBytes, String oldText, String newText) {
+        if (rawBytes == null || oldText == null || newText == null
+                || oldText.isEmpty() || newText.isEmpty() || oldText.equals(newText)) {
+            return rawBytes;
+        }
+        if (oldText.length() != newText.length()) {
+            return rawBytes;
+        }
+        byte[] out = rawBytes.clone();
+        int count = replaceStringBothEncodings(out, oldText, newText);
+        if (count > 0) {
+            logToUi("[INFO] resources.arsc label '" + oldText + "' -> '" + newText + "' replaced (" + count + " matches).");
+        }
         return out;
     }
 
@@ -330,26 +386,29 @@ public class MainActivity extends AppCompatActivity {
         return pkg + pad;
     }
 
-    private void replaceStringBothEncodings(byte[] data, String oldStr, String newStr) {
-        if (oldStr.length() != newStr.length()) return;
+    private int replaceStringBothEncodings(byte[] data, String oldStr, String newStr) {
+        if (oldStr.length() != newStr.length()) return 0;
+        int total = 0;
 
         byte[] oldUtf16 = oldStr.getBytes(StandardCharsets.UTF_16LE);
         byte[] newUtf16 = newStr.getBytes(StandardCharsets.UTF_16LE);
         if (oldUtf16.length == newUtf16.length) {
-            replaceByteSequence(data, oldUtf16, newUtf16);
+            total += replaceByteSequence(data, oldUtf16, newUtf16);
         }
 
         byte[] oldUtf8 = oldStr.getBytes(StandardCharsets.UTF_8);
         byte[] newUtf8 = newStr.getBytes(StandardCharsets.UTF_8);
         if (oldUtf8.length == newUtf8.length) {
-            replaceByteSequence(data, oldUtf8, newUtf8);
+            total += replaceByteSequence(data, oldUtf8, newUtf8);
         }
+        return total;
     }
 
-    private void replaceByteSequence(byte[] data, byte[] target, byte[] replacement) {
+    private int replaceByteSequence(byte[] data, byte[] target, byte[] replacement) {
         if (target.length == 0 || target.length != replacement.length || data.length < target.length) {
-            return;
+            return 0;
         }
+        int count = 0;
         for (int i = 0; i <= data.length - target.length; i++) {
             boolean match = true;
             for (int j = 0; j < target.length; j++) {
@@ -360,9 +419,11 @@ public class MainActivity extends AppCompatActivity {
             }
             if (match) {
                 System.arraycopy(replacement, 0, data, i, replacement.length);
+                count++;
                 i += target.length - 1;
             }
         }
+        return count;
     }
 
     private File prepareSourceApkFile(File workDir, String importedApkBase64) throws IOException {
@@ -415,7 +476,9 @@ public class MainActivity extends AppCompatActivity {
             byte[] configBytes,
             byte[] iconBytes,
             String oldPkg,
-            String newPkg
+            String newPkg,
+            String oldLabel,
+            String newLabel
     ) throws IOException {
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(inApk)));
              ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(outApk))) {
@@ -444,7 +507,11 @@ public class MainActivity extends AppCompatActivity {
                 byte[] entryBytes = readStreamToBytes(zis);
 
                 if ("AndroidManifest.xml".equals(name)) {
-                    entryBytes = patchBinaryManifestFixedLength(entryBytes, oldPkg, newPkg);
+                    entryBytes = patchBinaryManifestFixedLength(entryBytes, oldPkg, newPkg, oldLabel, newLabel);
+                }
+
+                if ("resources.arsc".equals(name)) {
+                    entryBytes = patchBinaryStringPoolFixedLength(entryBytes, oldLabel, newLabel);
                 }
 
                 if ("assets/appConfig.js".equals(name)) {
