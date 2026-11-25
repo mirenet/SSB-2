@@ -808,12 +808,6 @@ public class MainActivity extends AppCompatActivity {
         return derWrap(0x0C, s.getBytes(StandardCharsets.UTF_8));
     }
 
-   /*private static byte[] derUtcTime(Date date) throws IOException {
-        SimpleDateFormat sdf = new SimpleDateFormat("yyMMddHHmmss'Z'", Locale.US);
-        sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
-        return derWrap(0x17, sdf.format(date).getBytes(StandardCharsets.US_ASCII));
-    }*/
-
     private static byte[] derUtcTime(Date date) throws IOException {
         SimpleDateFormat sdf = new SimpleDateFormat("yyyyMMddHHmmss'Z'", Locale.US);
         sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
