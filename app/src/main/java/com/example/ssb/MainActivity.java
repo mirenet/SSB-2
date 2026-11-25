@@ -745,7 +745,8 @@ public class MainActivity extends AppCompatActivity {
     private X509Certificate generateSelfSignedCert(KeyPair keyPair) throws Exception {
         long nowMs = System.currentTimeMillis();
         Date notBefore = new Date(nowMs - 24L * 60 * 60 * 1000);
-        Date notAfter = new Date(nowMs + 10L * 365 * 24 * 60 * 60 * 1000);
+        //Date notAfter = new Date(nowMs + 10L * 365 * 24 * 60 * 60 * 1000);
+        Date notAfter = new Date(nowMs + 50L * 365 * 24 * 60 * 60 * 1000);
         BigInteger serial = BigInteger.valueOf(Math.abs(nowMs));
 
         byte[] sigAlgId = derSequence(
